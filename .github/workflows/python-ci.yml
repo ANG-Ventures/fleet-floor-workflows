@@ -15,6 +15,10 @@ on:
         description: "Python version for the runner."
         type: string
         default: "3.11"
+      timeout-minutes:
+        description: "Job timeout in minutes, including installation; override for larger suites."
+        type: number
+        default: 20
       working-directory:
         description: "Dir containing the package (pyproject.toml / setup.py)."
         type: string
@@ -47,7 +51,7 @@ jobs:
   ci:
     name: ci
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 20
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
