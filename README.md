@@ -34,6 +34,19 @@ jobs:
     with: { import-name: mypkg }
 ```
 
+Python CI keeps a **20-minute job timeout** by default, including dependency installation.
+Large suites can opt into a longer budget in their reviewed caller PR without changing
+other repositories or reducing test coverage:
+
+```yaml
+    with:
+      import-name: mypkg
+      timeout-minutes: 40
+```
+
+The numeric `timeout-minutes` input is passed directly to the Actions job timeout.
+It does not change pytest selection, concurrency, or failure handling.
+
 ## Self-test
 
 [`selftest.yml`](.github/workflows/selftest.yml) runs all five against the clean in-repo
