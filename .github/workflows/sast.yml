@@ -31,6 +31,14 @@ on:
           Opt a workflow out on purpose with a line `# path-filter-exempt: <why>`.
         type: boolean
         default: true
+      private-venue-lint:
+        description: >-
+          Fleet R15: in a PRIVATE repo, every job in a workflow this PR adds/modifies must run on a
+          Blacksmith x64 label, the local CI box label `ace-ci-box`, or macos-*/windows-*
+          (`vars.X || 'blacksmith-...'` fallbacks pass). `warn` annotates only, `fail` fails the
+          check, `off` skips. Exempt a job with `# venue-exempt: <why>` / `# github-hosted: <why>`.
+        type: string
+        default: "warn"
 
 permissions:
   contents: read
@@ -63,7 +71,7 @@ jobs:
           cache-dependency-path: .github/workflows/*.yml
 
       - name: Changed workflow files (path-filter lint input)
-        if: inputs.workflow-path-filter-lint && github.event_name == 'pull_request'
+        if: (inputs.workflow-path-filter-lint || inputs.private-venue-lint != 'off') && github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           # HEAD = refs/pull/N/merge; HEAD^1 = base tip. Only files this PR adds/modifies/renames.
@@ -107,6 +115,117 @@ jobs:
                   bad += 1
           print("workflow path-filter lint: %d finding(s)" % bad)
           sys.exit(1 if bad else 0)
+          PY
+
+      - name: Private-repo runner venue lint (fleet R15)
+        if: inputs.private-venue-lint != 'off' && github.event_name == 'pull_request' && github.event.repository.private
+        env:
+          R15_MODE: ${{ inputs.private-venue-lint }}
+        run: |
+          set -euo pipefail
+          pip install -q "PyYAML>=6"
+          python - /tmp/wf-changed.txt <<'PY'
+          # Same rule as fleet-ops-scripts ci-speed-lint R15 (t_b38fe79c). Private repos only.
+          import json, os, re, sys, yaml
+          MODE = os.environ.get("R15_MODE", "warn")
+          EXEMPT = re.compile(r"#[ \t]*(venue-exempt|github-hosted):[ \t]*\S")
+          ARM = re.compile(r"blacksmith-[a-z0-9._-]*?-arm(?![a-z])")
+          def ok(l):
+              l = str(l).strip().lower()
+              return (l == "ace-ci-box" or l.startswith(("macos-", "windows-"))
+                      or (l.startswith("blacksmith-") and not ARM.search(l)))
+          def cands(ro, job, wf, d=0):
+              """(label sets ro can evaluate to, unresolvable refs). vars.* is runtime-only."""
+              if d > 4: return [], ["<nested>"]
+              if isinstance(ro, dict):
+                  return cands(ro["labels"], job, wf, d + 1) if "labels" in ro else ([], ["runs-on group"])
+              if isinstance(ro, list):
+                  if not any(("$" + "{{") in str(x) for x in ro): return [[str(x) for x in ro]], []
+                  c, u = [], []
+                  for x in ro:
+                      a, b = cands(x, job, wf, d + 1); c += a; u += b
+                  return c, u
+              s = str(ro or "").strip()
+              exprs = re.findall(r"\$\{\{(.*?)\}\}", s, re.S)
+              if not exprs: return ([[s]] if s else []), []
+              c, u = [], []
+              for e in exprs:
+                  for m in re.finditer(r"'((?:[^']|'')*)'", e):
+                      if re.search(r"(==|!=)\s*$", e[:m.start()]) or re.match(r"\s*(==|!=)", e[m.end():]): continue
+                      lit = m.group(1).replace("''", "'")
+                      try: v = json.loads(lit)
+                      except ValueError: v = lit
+                      c.append([str(x) for x in v] if isinstance(v, list) else [str(v)])
+                  bare = re.sub(r"'((?:[^']|'')*)'", "''", e)
+                  for m in re.finditer(r"\b([A-Za-z_]+)\.([A-Za-z0-9_-]+)", bare):
+                      ctx, key = m.groups()
+                      if ctx == "vars": continue
+                      if ctx == "github" and re.search(r"github\.[\w.]+\s*(==|!=)", bare[m.start():]): continue
+                      vals = None
+                      if ctx == "matrix":
+                          mx = (job.get("strategy") or {}).get("matrix") if isinstance(job.get("strategy"), dict) else None
+                          if isinstance(mx, dict):
+                              vals = list(mx.get(key)) if isinstance(mx.get(key), list) else []
+                              vals += [i[key] for i in (mx.get("include") or []) if isinstance(i, dict) and key in i]
+                              vals = vals or None
+                      elif ctx == "inputs":
+                          on = wf.get("on", wf.get(True)) or {}
+                          found = False
+                          for ev in ("workflow_call", "workflow_dispatch"):
+                              ins = (on.get(ev) or {}).get("inputs") if isinstance(on, dict) and isinstance(on.get(ev), dict) else None
+                              if isinstance(ins, dict) and isinstance(ins.get(key), dict):
+                                  found = True
+                                  if "default" in ins[key]: vals = [ins[key]["default"]]
+                          if found and vals is None: continue
+                      if vals is None: u.append("%s.%s" % (ctx, key)); continue
+                      for v in vals:
+                          a, b = cands(v, job, wf, d + 1); c += a; u += b
+              return c, u
+          bad = 0
+          for path in [l.strip() for l in open(sys.argv[1]) if l.strip()]:
+              text = open(path).read(); lines = text.splitlines()
+              try:
+                  root = yaml.compose(text); wf = yaml.safe_load(text) or {}
+              except yaml.YAMLError:
+                  continue  # the R14 step already reports unparsable workflows
+              spans, jobs_line = {}, -1
+              if isinstance(root, yaml.MappingNode):
+                  for k, v in root.value:
+                      if k.value == "jobs" and isinstance(v, yaml.MappingNode):
+                          jobs_line = k.start_mark.line
+                          spans = {str(jk.value): (jk.start_mark.line, jv.end_mark.line) for jk, jv in v.value}
+              if any(EXEMPT.search(l) for l in lines[:max(jobs_line, 0)]):
+                  print("exempt: %s" % path); continue
+              for jid, job in ((wf.get("jobs") or {}) if isinstance(wf, dict) else {}).items():
+                  job = job if isinstance(job, dict) else {}
+                  a, b = spans.get(str(jid), (0, -1))
+                  if any(EXEMPT.search(l) for l in lines[a:b + 1]): continue
+                  uses = str(job.get("uses") or ""); w = job.get("with") if isinstance(job.get("with"), dict) else {}
+                  msgs = []
+                  if uses:
+                      if "runner" not in w:
+                          if not uses.startswith("./"):
+                              msgs.append("reusable workflow %s runs on its default runner (ubuntu-latest); pass `runner:`" % uses.split("@")[0])
+                          ro = None
+                      else:
+                          ro = w["runner"]
+                          if isinstance(ro, str) and ro.strip().startswith(("[", '"')):
+                              try: ro = json.loads(ro)
+                              except ValueError: pass
+                  else:
+                      ro = job.get("runs-on")
+                      if ro is None: msgs.append("no runs-on")
+                  if ro is not None:
+                      c, u = cands(ro, job, wf)
+                      msgs += ["runs-on %s" % ",".join(x) for x in c if not any(ok(l) for l in x)]
+                      msgs += ["runs-on depends on %s (venue not provable)" % x for x in u]
+                  for m in dict.fromkeys(msgs):
+                      print("::%s file=%s::job `%s` %s: private repo on GitHub-hosted Linux (metered minutes). Use a "
+                            "Blacksmith x64 label, `vars.CI_RUNNER || 'blacksmith-...'`, or ace-ci-box; else a line "
+                            "`# venue-exempt: <why>` in the job." % ("error" if MODE == "fail" else "warning", path, jid, m))
+                      bad += 1
+          print("private-repo venue lint (%s): %d finding(s)" % (MODE, bad))
+          sys.exit(1 if bad and MODE == "fail" else 0)
           PY
 
       - name: Install semgrep

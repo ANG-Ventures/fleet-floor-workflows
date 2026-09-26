@@ -1,0 +1,36 @@
+name: ci-dead-label-sweep tests
+# WHY (card t_7fffc16b, 2026-09-26): scripts/ci-dead-label-sweep.py CANCELS Actions runs
+# (cron, */10). Its allowlist decides what is "dead"; a wrong prefix match would cancel
+# live CI. hooks/ci_dispatch_workflow_drift_policy.py (worker gate 15) is the upstream
+# guard for the same incident. Both suites are pure/offline.
+on:
+  pull_request:
+    paths:
+      - 'scripts/ci-dead-label-sweep.py'
+      - 'scripts/tests/test_ci_dead_label_sweep.py'
+      - 'hooks/ci_dispatch_workflow_drift_policy.py'
+      - 'hooks/test_ci_dispatch_workflow_drift_policy.py'
+      - 'hooks/pr_base_drift_policy.py'
+      - 'hooks/clone_reference_policy.py'
+      - '.github/workflows/ci-dead-label-sweep-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/ci-dead-label-sweep.py'
+      - 'hooks/ci_dispatch_workflow_drift_policy.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  dead-label-sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: sweeper contract suite
+        run: python3 scripts/tests/test_ci_dead_label_sweep.py -v
+      - name: gate 15 dispatch-drift suite (+ mutation arm)
+        run: HOME="$(mktemp -d /tmp/hooksbx.XXXX)" python3 hooks/test_ci_dispatch_workflow_drift_policy.py

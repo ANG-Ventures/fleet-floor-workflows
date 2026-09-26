@@ -1,0 +1,109 @@
+# CI for fleet-ops-scripts (t_a6c11f7c).
+#
+# Required check on main: `fos-ci` (the aggregate job below), next to `fleet/attribution`.
+# It is green only when every leg passed:
+#   - pytest -q on py3.11 and py3.14
+#   - the PIN byte-identity test against the pinned ANG-Ventures/hermes-agent sha, which must
+#     PASS (a skip = the upstream sha was not fetched = red here)
+#   - mutation_gate.py (baseline green + every mutant killed)
+#   - ci-speed-lint/tests
+#
+# Credentials: none. ANG-Ventures/hermes-agent is a PUBLIC repo, so the pinned sha is fetched
+# anonymously over https. No repo secret is read by this workflow.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  cioc-pytest:
+    name: cioc-pytest (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    defaults:
+      run:
+        working-directory: ci-overflow-controller
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --quiet pytest
+      - name: Fetch pinned hermes-agent sha into ~/.hermes/hermes-agent
+        run: |
+          sha=$(python -c 'import json; print(json.load(open("PIN.json"))["source_sha"])')
+          repo=$(python -c 'import json; print(json.load(open("PIN.json"))["source_repo"])')
+          src="$HOME/.hermes/hermes-agent"
+          git init -q "$src"
+          git -C "$src" fetch -q --depth=1 "https://github.com/${repo}.git" "$sha"
+          git -C "$src" cat-file -e "${sha}^{commit}"
+          echo "fetched ${repo}@${sha}"
+      - name: pytest -q
+        run: python -m pytest -q
+      - name: PIN byte-identity must PASS (skip = red)
+        run: |
+          python -m pytest -q -rA -p no:cacheprovider \
+            "tests/test_reconcile_relay.py::test_vendored_p1_is_byte_identical_to_pin" | tee pin.log
+          grep -q '^PASSED .*test_vendored_p1_is_byte_identical_to_pin' pin.log
+
+  cioc-mutation-gate:
+    name: cioc-mutation-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ci-overflow-controller
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --quiet pytest
+      - name: mutation_gate.py
+        run: python mutation_gate.py
+
+  ci-speed-lint:
+    name: ci-speed-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --quiet pytest pyyaml
+      - run: python -m pytest -q -p no:cacheprovider ci-speed-lint/tests
+
+  # Required check. Not covered here (host-coupled on hosted ubuntu, see PR #70):
+  #   ci-runners/ (47/519 fail: needs XFS, ~/.hermes/var/ci-runners/hosts.json, ssh)
+  #   mac-studio/ramscratch/ (macOS-only install/rollback script)
+  fos-ci:
+    name: fos-ci
+    if: always()
+    needs: [cioc-pytest, cioc-mutation-gate, ci-speed-lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: every leg must succeed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "needs results: $RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || exit 1; done

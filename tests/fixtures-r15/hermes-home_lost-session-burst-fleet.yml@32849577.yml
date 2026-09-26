@@ -1,0 +1,25 @@
+name: lost-session-burst-fleet
+on:
+  pull_request:
+    paths:
+      - scripts/lost-session-burst-fleet.py
+      - scripts/test_lost_session_burst_fleet.py
+      - .github/workflows/lost-session-burst-fleet.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/lost-session-burst-fleet.py
+      - scripts/test_lost_session_burst_fleet.py
+      - .github/workflows/lost-session-burst-fleet.yml
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  coalesce-replay:
+    runs-on: ${{ vars.CI_HOME_RUNNER || 'blacksmith-2vcpu-ubuntu-2404' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: python3 scripts/test_lost_session_burst_fleet.py

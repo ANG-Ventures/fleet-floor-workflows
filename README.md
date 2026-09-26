@@ -60,6 +60,18 @@ ci-speed-lint R14 (Kyzcreig/fleet-ops-scripts). Callers can pass
 `workflow-path-filter-lint: false` to the sast component, but that is a reviewed caller change.
 Contract + red/green cases: `tests/test_workflow_path_filter_lint.py`.
 
+### Private-repo runner venue lint (fleet R15)
+
+In a **private** repo (`github.event.repository.private`, so no token), `sast.yml` also checks
+every job in the workflow files the PR adds or modifies. It must run on a Blacksmith x64 label, the
+reserved local CI box label `ace-ci-box`, or `macos-*` / `windows-*`. A `vars.CI_RUNNER ||
+'blacksmith-...'` fallback passes (the variable's live value is checked daily by ci-speed-lint R15
+at runtime). A reusable-workflow caller must pass an allowed `runner:`. Exempt a job with a line
+`# venue-exempt: <why>` or `# github-hosted: <why>` inside it; the same line above `jobs:` exempts the
+file. Input `private-venue-lint`: `warn` (default, annotations only), `fail`, or `off`. It flips to
+`fail` once every private repo is on an allowed venue. Public repos are skipped: their minutes are
+free. Red/green cases on real private-repo bytes: `tests/test_private_venue_lint.py`.
+
 ## Self-test
 
 [`selftest.yml`](.github/workflows/selftest.yml) runs all five against the clean in-repo
