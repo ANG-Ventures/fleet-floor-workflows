@@ -24,6 +24,13 @@ on:
       semgrep-version:
         type: string
         default: "1.46.0"
+      workflow-path-filter-lint:
+        description: >-
+          Fleet R14: fail a pull_request that adds or modifies a push/pull_request(_target)
+          workflow with no paths:/paths-ignore: filter (it would fire on every bot/docs commit).
+          Opt a workflow out on purpose with a line `# path-filter-exempt: <why>`.
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -43,6 +50,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # 2 = the PR merge commit + its first parent (the base tip), so the path-filter lint can
+          # diff exactly this PR's workflow changes without history.
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -50,6 +61,53 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: .github/workflows/*.yml
+
+      - name: Changed workflow files (path-filter lint input)
+        if: inputs.workflow-path-filter-lint && github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          # HEAD = refs/pull/N/merge; HEAD^1 = base tip. Only files this PR adds/modifies/renames.
+          git diff --name-only --diff-filter=AMR HEAD^1 HEAD -- .github/workflows \
+            | grep -E '\.ya?ml$' > /tmp/wf-changed.txt || true
+          echo "workflow files changed by this PR: $(wc -l < /tmp/wf-changed.txt)"
+          cat /tmp/wf-changed.txt
+
+      - name: Workflow path-filter lint (fleet R14)
+        if: inputs.workflow-path-filter-lint && github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          pip install -q "PyYAML>=6"
+          python - /tmp/wf-changed.txt <<'PY'
+          # Same rule as fleet-ops-scripts ci-speed-lint R14 (port of hermes-home #833).
+          import re, sys, yaml
+          EXEMPT = re.compile(r"^[ \t]*#[ \t]*path-filter-exempt:[ \t]*\S", re.M)
+          bad = 0
+          for path in [l.strip() for l in open(sys.argv[1]) if l.strip()]:
+              text = open(path).read()
+              if EXEMPT.search(text):
+                  print("exempt: %s" % path)
+                  continue
+              try:
+                  wf = yaml.safe_load(text) or {}
+              except yaml.YAMLError as e:
+                  print("::error file=%s::unparsable workflow (%s)" % (path, type(e).__name__)); bad += 1; continue
+              on = wf.get("on", wf.get(True)) if isinstance(wf, dict) else None
+              if isinstance(on, str): on = {on: None}
+              if isinstance(on, list): on = {str(k): None for k in on}
+              if not isinstance(on, dict): continue
+              for trig in ("push", "pull_request", "pull_request_target"):
+                  if trig not in on: continue
+                  cfg = on[trig] if isinstance(on[trig], dict) else {}
+                  if "paths" in cfg or "paths-ignore" in cfg: continue
+                  if trig == "push" and ({"tags", "tags-ignore"} & set(cfg)) and not ({"branches", "branches-ignore"} & set(cfg)):
+                      continue  # tag-only push never fires on a commit
+                  print("::error file=%s::`%s` trigger has no paths/paths-ignore filter: it fires on every "
+                        "bot/docs commit. Add a filter, or a line `# path-filter-exempt: <why>` "
+                        "(e.g. the pull_request run is a required check)." % (path, trig))
+                  bad += 1
+          print("workflow path-filter lint: %d finding(s)" % bad)
+          sys.exit(1 if bad else 0)
+          PY
 
       - name: Install semgrep
         env:
