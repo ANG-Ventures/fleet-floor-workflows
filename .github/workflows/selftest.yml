@@ -4,8 +4,10 @@
 # branch-protection + FLOOR_MAP must use (spec B-O2-3 / D-12). DO NOT delete: it's the floor's own floor.
 name: floor-selftest
 
+# path-filter-exempt: pull_request produces the REQUIRED floor checks (ci / ci ...); a path-filtered required check sits pending forever. push:main is filtered.
 on:
   push:
+    paths-ignore: ['**.md']  # skip docs/bot-only commits (fleet R14, t_e47ee8bf)
     branches: [main]
   pull_request:
   workflow_dispatch:

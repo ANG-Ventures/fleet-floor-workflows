@@ -47,6 +47,19 @@ other repositories or reducing test coverage:
 The numeric `timeout-minutes` input is passed directly to the Actions job timeout.
 It does not change pytest selection, concurrency, or failure handling.
 
+### Workflow path-filter lint (fleet R14)
+
+`sast.yml` also fails a **pull_request** that adds or modifies a workflow whose `push` /
+`pull_request` / `pull_request_target` trigger has no `paths:` / `paths-ignore:` filter: such a
+workflow fires on every bot or docs-only commit (hermes-home #833: ~550 wasted runs/week). Only
+the files the PR itself changes are checked (`HEAD^1..HEAD` of the PR merge commit), so a repo's
+older workflows do not turn red until someone edits them. Opt a workflow out on purpose with a line
+`# path-filter-exempt: <why>` (the usual reason: its pull_request run is a required check, and a
+path-filtered required check sits pending forever). The same rule runs fleet-wide daily as
+ci-speed-lint R14 (Kyzcreig/fleet-ops-scripts). Callers can pass
+`workflow-path-filter-lint: false` to the sast component, but that is a reviewed caller change.
+Contract + red/green cases: `tests/test_workflow_path_filter_lint.py`.
+
 ## Self-test
 
 [`selftest.yml`](.github/workflows/selftest.yml) runs all five against the clean in-repo

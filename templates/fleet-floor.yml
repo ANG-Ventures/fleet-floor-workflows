@@ -9,9 +9,11 @@
 #   __SAST_TARGET__    path semgrep scans (default the package dir)
 name: fleet-floor
 
+# path-filter-exempt: pull_request produces the REQUIRED floor checks (ci / ci ...); a path-filtered required check sits pending forever. push:main is filtered.
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'docs/**']  # skip docs/bot-only commits (fleet R14)
   pull_request:
 
 permissions:
