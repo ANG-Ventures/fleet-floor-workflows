@@ -76,6 +76,35 @@ ci-speed-lint R14 (Kyzcreig/fleet-ops-scripts). Callers can pass
 `workflow-path-filter-lint: false` to the sast component, but that is a reviewed caller change.
 Contract + red/green cases: `tests/test_workflow_path_filter_lint.py`.
 
+### Override lint (`override-lint.yml`, job `override_lint`)
+
+A pull request that **adds a refusal** must say how an operator gets past it, or say on purpose
+that nobody can (card t_8f526b34, from the operator-capability audit t_674b3ce7: hermes-agent #1116
+shipped a blanket "workers never pin" refusal with neither).
+
+- **Hit** = an added, non-test, non-comment code line whose quoted text matches
+  `refus|never|not allowed|orchestrator-only|must not|denied|forbidden`, either under a scoped path
+  (input `scope`; default `hermes_cli/ tools/ gateway/ cron/ hooks/ scripts/fleet-merge.sh
+  scripts/gh-shim.py`, directories at any depth) or anywhere on a new `raise *Error(`,
+  `emit_block(`, `sys.exit(<nonzero>)` or `HTTPException(409` (message may follow on the next 3 lines).
+- Hits matching the **no-override-by-design allowlist** are exempt. The seed is the register's
+  class A rows (gates 3/7/8, Momus, the kanban live-board guard); callers add reviewed entries via
+  input `allowlist` (`path:<regex> <why>` or `line:<regex> <why>`).
+- Any other hit **fails** the job unless the PR body carries one of:
+
+  ```
+  Override: `--flag-name "<reason>"` (or ENV_VAR=1 / a reason field) — <how it is audited>
+  Override: none by design — <why no operator may bypass this>
+  ```
+
+  Prose is accepted with a notice when the body says "no … override" / "none by design", or names
+  an override-shaped `--allow-*`/`--force*`/… flag or `*_OVERRIDE`/`*_ALLOW*`/`NAME=0|1` env that the
+  diff itself adds.
+- A named override that appears in no `*.md` under input `docs-paths` (default `skills-shared skills`)
+  gets a **warning** (not a failure). The body is re-read over REST on each run, so the caller
+  template listens to `edited`. Caller: [`templates/override-lint.yml`](templates/override-lint.yml).
+  Contract + red/green cases: `tests/test_override_lint.py`.
+
 ## Self-test
 
 [`selftest.yml`](.github/workflows/selftest.yml) runs all five against the clean in-repo

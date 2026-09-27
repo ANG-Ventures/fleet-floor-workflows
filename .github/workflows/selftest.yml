@@ -233,6 +233,14 @@ jobs:
           if [ "$rc" -ne 2 ]; then echo "::error::expected exit 2 on planted slop, got $rc"; exit 1; fi
           echo "::notice::slop-detect teeth intact (exit 2 on planted fixture)"
 
+  # --- override lint (override-lint.yml, t_8f526b34): a PR adding a refusal names its override. The
+  # red/green contract runs in timeout_contract (tests/test_override_lint.py); this proves the reusable
+  # workflow itself runs green on a real runner (this repo adds no refusals in scoped paths).
+  override_lint:
+    uses: ./.github/workflows/override-lint.yml
+    with:
+      concurrency-suffix: selftest
+
   # --- default TEST floor (test-ci.yml, t_1f7fff87): the language-detected `test` job a repo with no
   # test CI gets. One caller per sample so each branch goes green on a real runner: python ->
   # pytest, js -> npm test, generic (shell/Makefile/HTML) -> bash -n.
