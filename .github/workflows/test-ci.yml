@@ -1,0 +1,162 @@
+# Reusable floor component: `test` — the DEFAULT test CI for a fleet repo that has none.
+# Language-detected, one job, no per-repo configuration needed (t_1f7fff87, Ace 2026-09-27:
+# "maybe by default we should have CI for them"):
+#   python (pyproject/setup/requirements or any *.py):
+#       install like python-ci.yml, then pytest if a tests/ or test/ dir holds test_*.py / *_test.py,
+#       else build/lint: `python -m compileall` + ruff's syntax/undefined-name rules (E9,F63,F7,F82)
+#   node (package.json):
+#       install, then `npm test` if a real test script exists (not npm's "no test specified" stub),
+#       else `npm run build` if a build script exists, else `npm run lint`, else `node --check`
+#   shell (*.sh): `bash -n` on every script
+#   none of the above: a green no-op with a warning (strength=none — ci-speed-lint R15 still sees
+#       the repo as covered, so only add this caller where one of the three branches applies)
+# Emits the check-run `<caller-job> / test`. The job name `test` is a frozen contract.
+# Everything the step decides is printed as `floor-test: <branch> -> <command>`; set
+# FLOOR_TEST_DRY_RUN=1 to print the plan without running it (tests/test_test_ci.py uses that).
+name: floor-test-ci
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "Runner label. Private ANG-Ventures repos pass blacksmith-2vcpu-ubuntu-2404 (x64 only)."
+        type: string
+        default: "ubuntu-latest"
+      working-directory:
+        description: "Directory to test."
+        type: string
+        default: "."
+      python-version:
+        type: string
+        default: "3.11"
+      node-version:
+        type: string
+        default: "20"
+      install:
+        description: "Custom install command (replaces the detected install)."
+        type: string
+        default: ""
+      timeout-minutes:
+        type: number
+        default: 20
+      concurrency-suffix:
+        description: "Disambiguator when one workflow calls this reusable workflow more than once."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: floor-test-${{ github.workflow }}-${{ inputs.concurrency-suffix }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Set up Node
+        if: ${{ hashFiles(format('{0}/package.json', inputs.working-directory)) != '' }}
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Detect and run
+        env:
+          INSTALL_CMD: ${{ inputs.install }}
+        run: |
+          set -euo pipefail
+          dry="${FLOOR_TEST_DRY_RUN:-0}"
+          ran=0
+          do_run() {  # print the decision, then run it (unless dry-run)
+            echo "floor-test: $1 -> $2"
+            if [ "$dry" != 1 ]; then bash -c "$2"; fi
+            ran=1
+          }
+          # Every file search prunes vendored trees and exits by itself (-print -quit, no pipe):
+          # `find | grep -q` under pipefail races into SIGPIPE 141 on big trees (floor v5 fix).
+          PRUNE="\( -path '*/node_modules' -o -path '*/.git' -o -path '*/.venv' -o -path '*/venv' -o -path '*/dist' -o -path '*/build' \) -prune"
+          first() {
+            find . \( -path '*/node_modules' -o -path '*/.git' -o -path '*/.venv' -o -path '*/venv' -o -path '*/dist' -o -path '*/build' \) -prune \
+              -o \( "$@" \) -print -quit 2>/dev/null || true
+          }
+
+          if [ -n "$INSTALL_CMD" ]; then
+            do_run install "$INSTALL_CMD"
+          fi
+
+          # ---- python
+          if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ] || [ -f requirements.txt ] || [ -n "$(first -name '*.py')" ]; then
+            if [ -z "$INSTALL_CMD" ]; then
+              if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ]; then
+                do_run python-install "python -m pip install -q -e . || python -m pip install -q . || echo '::warning::package not pip-installable; continuing'"
+              fi
+              if [ -f requirements.txt ]; then
+                do_run python-install "python -m pip install -q -r requirements.txt || echo '::warning::requirements.txt install had problems; continuing'"
+              fi
+            fi
+            tdir=""
+            for d in tests test; do
+              if [ -d "$d" ] && [ -n "$(find "$d" \( -name 'test_*.py' -o -name '*_test.py' \) -print -quit 2>/dev/null || true)" ]; then
+                tdir="$d"; break
+              fi
+            done
+            if [ -n "$tdir" ]; then
+              do_run python-test "python -m pip install -q pytest && python -m pytest $tdir -q"
+            else
+              echo "::notice::no python tests dir -> build/lint [strength=weak]"
+              do_run python-build "python -m compileall -q -x '/(node_modules|\.git|\.venv|venv)/' ."
+              do_run python-lint "python -m pip install -q ruff && ruff check --select E9,F63,F7,F82 --output-format github ."
+            fi
+          fi
+
+          # ---- node
+          if [ -f package.json ]; then
+            if [ -z "$INSTALL_CMD" ]; then
+              if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+                do_run node-install "npm ci"
+              elif [ -f pnpm-lock.yaml ]; then
+                do_run node-install "corepack enable && pnpm install --frozen-lockfile"
+              elif [ -f yarn.lock ]; then
+                do_run node-install "corepack enable && yarn install --frozen-lockfile"
+              else
+                do_run node-install "npm install"
+              fi
+            fi
+            script() { node -e "const s=(require('./package.json').scripts||{})['$1']||''; process.exit(s && !/no test specified/.test(s) ? 0 : 1)"; }
+            if script test; then
+              do_run node-test "npm test"
+            elif script build; then
+              echo "::notice::no npm test script -> build [strength=weak]"
+              do_run node-build "npm run build"
+            elif script lint; then
+              echo "::notice::no npm test/build script -> lint [strength=weak]"
+              do_run node-lint "npm run lint"
+            else
+              echo "::notice::no npm test/build/lint script -> node --check [strength=weak]"
+              do_run node-lint "find . $PRUNE -o \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) -print0 | xargs -0 -r -n1 node --check"
+            fi
+          fi
+
+          # ---- shell
+          if [ -n "$(first -name '*.sh')" ]; then
+            do_run shell-lint "find . $PRUNE -o -name '*.sh' -print0 | xargs -0 -r -n1 bash -n"
+          fi
+
+          if [ "$ran" = 0 ]; then
+            echo "::warning::floor-test: no python/node/shell code detected; nothing to test [strength=none]"
+            echo "floor-test: none -> (no-op)"
+          fi

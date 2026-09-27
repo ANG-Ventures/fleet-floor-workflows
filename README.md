@@ -47,6 +47,22 @@ other repositories or reducing test coverage:
 The numeric `timeout-minutes` input is passed directly to the Actions job timeout.
 It does not change pytest selection, concurrency, or failure handling.
 
+### Default test CI (`test-ci.yml`, job `test`)
+
+For a repo with **no** test/build CI on pull requests (ci-speed-lint R15 lists them daily). One
+job, no per-repo config, language-detected in the working directory:
+
+| Detected | Runs |
+|---|---|
+| python (`pyproject`/`setup.*`/`requirements.txt`/any `*.py`) | install, then `pytest` if `tests/` or `test/` holds `test_*.py`/`*_test.py`; else `compileall` + `ruff --select E9,F63,F7,F82` |
+| node (`package.json`) | install, then `npm test` (npm's "no test specified" stub does not count), else `npm run build`, else `npm run lint`, else `node --check` |
+| shell (`*.sh`) | `bash -n` on every script |
+
+Branches are additive (a polyglot repo runs each). A repo with none of them gets a warning and a
+green no-op, so only add the caller where a branch applies. Caller: [`templates/test-ci.yml`](templates/test-ci.yml);
+private ANG-Ventures repos pass `runner: blacksmith-2vcpu-ubuntu-2404`. Contract + branch
+detection: `tests/test_test_ci.py`; the selftest runs it on `sample/`, `js-sample/`, `generic-sample/`.
+
 ### Workflow path-filter lint (fleet R14)
 
 `sast.yml` also fails a **pull_request** that adds or modifies a workflow whose `push` /
