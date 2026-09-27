@@ -49,9 +49,9 @@ on:
         type: string
         default: ""
 
-permissions:
-  contents: read
-  pull-requests: read
+# No `permissions:` block on purpose: the job inherits the CALLER's grant. A reusable workflow may not
+# ask for more than its caller gives (asking = startup_failure), and the body read over REST needs
+# `pull-requests: read`, which the caller template grants. Without it the event payload body is used.
 
 concurrency:
   group: floor-override-lint-${{ github.workflow }}-${{ inputs.concurrency-suffix }}-${{ github.ref }}
