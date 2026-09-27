@@ -1,0 +1,26 @@
+# Default test CI — thin caller for a fleet repo that has no test/build CI (t_1f7fff87).
+# Copy to .github/workflows/test-ci.yml. Pin `uses:` to an IMMUTABLE 40-hex commit SHA of
+# ANG-Ventures/fleet-floor-workflows (never a moving tag).
+#
+# Placeholders:
+#   __FLOOR_SHA__   40-char commit SHA of the central repo
+#   __RUNNER__      private ANG-Ventures repo: blacksmith-2vcpu-ubuntu-2404 (Blacksmith is x64
+#                   only; never a *-arm label). Public or Kyzcreig repo: ubuntu-latest.
+name: test-ci
+
+# path-filter-exempt: pull_request is the PR test gate; a path-filtered check sits pending on a PR that skips it. push:main is filtered.
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ANG-Ventures/fleet-floor-workflows/.github/workflows/test-ci.yml@__FLOOR_SHA__
+    with:
+      runner: __RUNNER__
