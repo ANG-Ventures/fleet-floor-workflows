@@ -78,6 +78,15 @@ jobs:
       working-directory: js-sample
       concurrency-suffix: js
 
+  # Same reusable workflow with the opt-in job budget a large serial JS suite uses (claude-bpx:
+  # ~19.5 min on main against the 20-min default, t_b99fb921). Locked by tests/test_js_ci_timeout.py.
+  js_ci_timeout_override:
+    uses: ./.github/workflows/js-ci.yml
+    with:
+      working-directory: js-sample
+      timeout-minutes: 40
+      concurrency-suffix: js-timeout-override
+
   js_type_check:
     uses: ./.github/workflows/js-typecheck.yml
     with:
