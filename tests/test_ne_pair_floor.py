@@ -100,6 +100,73 @@ class RedGreen(unittest.TestCase):
         self.assertEqual(checks(base), ["ne_seed_missing"])
         self.assertEqual(checks('seed_gb_cache "$CLAUDE_CONFIG_DIR"\n' + base), [])
 
+    # --- Prism t_b83e184e (PR #18 @6050df1c): each test below is RED on that head. ---
+    FULL = "export %s=1\nexport %s=1\nexport %s=off\n" % (NE, GB, TT)
+
+    def test_seed_name_in_comment_is_not_a_seed(self):
+        for src, ext in ((self.FULL + "# TODO: seed_gb_cache\nexec claude -p hi\n", ".sh"),
+                         (self.FULL + "exec claude -p hi  # seed_gb_cache later\n", ".sh"),
+                         ('import subprocess\nENV = {"%s": "1", "%s": "1", "%s": "off"}\n'
+                          '# cachedGrowthBookFeatures\nsubprocess.run(["claude", "-p", "x"], env=ENV)\n' % (NE, GB, TT),
+                          ".py"),
+                         ('const e = {%s: "1", %s: "1", %s: "off"}; // seed_gb_cache\nspawn("claude", [], {env: e});\n'
+                          % (NE, GB, TT), ".js"),
+                         ('/* cfp_gb_seed_gate */\nconst e = {%s: "1", %s: "1", %s: "off"};\nspawn("claude", []);\n'
+                          % (NE, GB, TT), ".js")):
+            self.assertEqual(checks(src, ext), ["ne_seed_missing"], src)
+        # the seed as code still satisfies it
+        self.assertEqual(checks('seed_gb_cache "$D"  # seed\n' + self.FULL + "exec claude -p hi\n"), [])
+
+    def test_trailing_comment_is_not_an_env(self):
+        self.assertEqual(checks("true  # export %s=1\n" % NE), [])
+        self.assertEqual(checks("x = 1  # %s=1\n" % NE, ".py"), [])
+        self.assertEqual(checks('echo "a # b"\nexport %s=1\n' % NE), ["ne_gb_pair", "ne_tt_reminder"])
+
+    def test_dotenv_files_are_scanned(self):
+        for name in (".env", ".env.local"):
+            with tempfile.TemporaryDirectory() as d:
+                Path(d, name).write_text("%s=1\n" % NE)
+                r = run_embedded(d)
+                self.assertEqual(r.returncode, 1, name + r.stdout)
+                self.assertIn("%s:1 ne_tt_reminder" % name, r.stdout)
+                self.assertIn("1 files scanned", r.stdout)
+
+    def test_python_string_payload_is_code_docstring_is_not(self):
+        q3 = '"' * 3
+        src = "import subprocess\nsubprocess.run(%sexport %s=1\nexec claude -p hi%s, shell=True)\n" % (q3, NE, q3)
+        self.assertEqual(checks(src, ".py"), ["ne_gb_pair", "ne_seed_missing", "ne_tt_reminder"])
+        src = "CMD = %s\nexport %s=1\nclaude --continue\n%s\n" % ("'" * 3, NE, "'" * 3)
+        self.assertEqual(checks(src, ".py"), ["ne_gb_pair", "ne_seed_missing", "ne_tt_reminder"])
+        doc = "def f():\n    %s%s=1 prose%s\n    return 1\n" % (q3, NE, q3)
+        self.assertEqual(checks(doc, ".py"), [])
+
+    def test_any_claude_launch_is_a_spawn(self):
+        for launch, ext in (('exec claude "$@"', ".sh"), ("claude", ".sh"), ("claude --continue", ".sh"),
+                            ('"$HOME/.local/bin/claude" --continue', ".sh"), ("FOO=1 claude", ".sh"),
+                            ("out=$(claude --version)", ".sh"), ("true && claude", ".sh"),
+                            ("nohup claude --continue &", ".sh"), ("timeout 30 claude", ".sh"),
+                            ("ExecStart=/usr/local/bin/claude --continue", ".service"),
+                            ("  run: claude --continue", ".yml"),
+                            ('subprocess.run(["claude", "--continue"])', ".py"),
+                            ('subprocess.run("claude --continue", shell=True)', ".py"),
+                            ('os.system("claude")', ".py"),
+                            ('execSync("claude --continue")', ".js"),
+                            ("<key>Program</key><string>/usr/local/bin/claude</string>", ".plist")):
+            env = self.FULL
+            if ext == ".plist":
+                env = "".join("<key>%s</key><string>%s</string>\n" % kv for kv in ((NE, "1"), (GB, "1"), (TT, "off")))
+            elif ext in (".py", ".js"):
+                env = 'E = {"%s": "1", "%s": "1", "%s": "off"}\n' % (NE, GB, TT)
+            elif ext in (".service", ".yml"):
+                env = "Environment=%s=1\nEnvironment=%s=1\nEnvironment=%s=off\n" % (NE, GB, TT)
+            self.assertEqual(checks(env + launch + "\n", ext), ["ne_seed_missing"], launch)
+
+    def test_mentions_of_claude_are_not_spawns(self):
+        for line, ext in (("echo claude", ".sh"), ("brew install claude", ".sh"), ("claude = Client()", ".py"),
+                          ('x = {"claude": 1}', ".py"), ("claude.messages.create()", ".js"),
+                          ("<string>/usr/local/bin/claude-lane</string>", ".plist")):
+            self.assertEqual(checks(self.FULL + line + "\n", ext), [], line)
+
     def test_allowlist_suppresses_and_stale_warns(self):
         with tempfile.TemporaryDirectory() as d:
             Path(d, "p.sh").write_text("export %s=1\n" % NE)

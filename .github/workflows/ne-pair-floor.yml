@@ -76,7 +76,8 @@ jobs:
             ne_tt_reminder  family set without CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off   (BILLING, cache-independent)
             ne_gb_pair      family set without CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF=1 (BEHAVIOUR flags)
             ne_seed_missing family set + a spawn of the claude binary in the same file, and no GrowthBook seed step
-                            (cachedGrowthBookFeatures / seed_gb_cache / cfp_gb_seed_gate) in that file: the GB_DISK
+                            (cachedGrowthBookFeatures / seed_gb_cache / cfp_gb_seed_gate) in that file's CODE (a
+                            seed name in a comment is not a seed step; any `claude` invocation counts): the GB_DISK
                             pair reads an EMPTY cache in a fresh CLAUDE_CONFIG_DIR and is then inert.
           DO_NOT_TRACK / DISABLE_TELEMETRY are generic names other tools read too; they count only in a file
           that mentions `claude`.
@@ -91,9 +92,11 @@ jobs:
           """
           import argparse
           import fnmatch
+          import io
           import os
           import re
           import sys
+          import tokenize
 
           NOTE = ("vault note 'Claude Code — NONESSENTIAL_TRAFFIC disables prompt caching- mechanism, cost, "
                   "the fix (2026-09-30)'")
@@ -125,32 +128,109 @@ jobs:
           GB_RE = _assign((GB,), TRUTHY)
           TT_RE = _assign((TT,), r"off")
           SEED_RE = re.compile(r"cachedGrowthBookFeatures|seed_gb_cache|seedGbCache|seed-gb-cache|cfp_gb_seed_gate")
+          _PATH = r"(?:[\w./~${}-]*/)?"
           SPAWN_RE = re.compile(
-              r"(?:spawn|spawnSync|execFile|execFileSync|execa|Popen|subprocess\.(?:run|call|check_call|check_output)"
-              r"|os\.exec\w*)\s*\(\s*\[?\s*[\"'`](?:[^\"'`\s]*/)?claude[\"'`]"      # spawn("claude", ...) / Popen(["claude"
-              r"|[\[(,]\s*[\"'](?:[^\"'\s]*/)?claude[\"']\s*,\s*[\"']-(?:p|-print|-resume|-model|-output-format)"  # argv list
-              r"|(?:^|[\s;&|(`]|\$\()(?:exec\s+|command\s+)?(?:[\w./~${}-]*/)?claude\s+(?:-p\b|--print\b|--resume\b|--model\b|--output-format\b|--setting-sources)"
+              # library call whose command is claude: spawn("claude", ...) / Popen(["claude" / os.execvp("claude"
+              # / subprocess.run("claude --continue", shell=True) / os.system("claude ...") / execSync(`claude ...`)
+              r"(?:spawn|spawnSync|execFile|execFileSync|execSync|exec|execa|Popen|os\.system|os\.exec\w*"
+              r"|subprocess\.(?:run|call|check_call|check_output))\s*\(\s*\[?\s*[\"'`]" + _PATH + r"claude(?=[\"'`\s])"
+              # argv list whose first element is claude, whatever follows: ["claude", "--continue"] / ("/usr/bin/claude",)
+              r"|[\[(]\s*[\"']" + _PATH + r"claude[\"']\s*[,\])]"
+              # launchd ProgramArguments / Program
+              r"|<string>\s*" + _PATH + r"claude\s*</string>"
+              # shell command position, ANY arguments (bare `claude`, `exec claude "$@"`, `claude --continue`,
+              # `FOO=1 claude`, `$(claude ...)`, yaml `run: claude`, systemd `ExecStart=/usr/bin/claude`)
+              r"|(?:^[ \t]*(?:-[ \t]+)?(?:[\w-]+:[ \t]+)?|ExecStart=[-@+!:]*|[;&|`]|\$\()[ \t]*"
+              r"(?:(?:exec|command|nohup|time|env|sudo|nice|caffeinate|xargs|if|then|do|else|!)[ \t]+(?:-\S+[ \t]+)*"
+              r"|timeout[ \t]+(?:-\S+[ \t]+)*\S+[ \t]+)*"
+              r"(?:[A-Za-z_]\w*=\S*[ \t]+)*[\"']?" + _PATH + r"claude[\"']?(?=$|[ \t;&|)`,])(?![ \t]*[=:.(\[{])"
               r"|\"?\$\{?CLAUDE_BIN\b",
               re.M)
           COMMENT_RE = re.compile(r"^\s*(?:#(?!!)|//|<!--|\*\s|/\*)")
 
 
-          TRIPLE_RE = re.compile(r"(\"\"\"|\'\'\')[\s\S]*?\1")
           BLOCK_RE = re.compile(r"/\*[\s\S]*?\*/")
+          XML_COMMENT_RE = re.compile(r"<!--[\s\S]*?-->")
+          JS_EXT = (".js", ".mjs", ".cjs", ".ts", ".tsx")
 
 
           def _keep_lines(m):
               return "\n" * m.group(0).count("\n")
 
 
+          def _strip_py(text):
+              """Blank python comments and DOCSTRINGS (a string literal that is a whole statement) only. Every other
+              string literal is kept: a triple-quoted shell payload handed to subprocess is code, not prose.
+              Untokenizable source is returned unchanged (scan more, never less)."""
+              try:
+                  toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+              except (tokenize.TokenError, SyntaxError):
+                  return text
+              starts = [0]
+              for line in text.split("\n"):
+                  starts.append(starts[-1] + len(line) + 1)
+              skip = (tokenize.NL, tokenize.COMMENT)
+              sig = [t for t in toks if t.type not in skip]
+              spans = [(t.start, t.end) for t in toks if t.type == tokenize.COMMENT]
+              for i, t in enumerate(sig):
+                  if t.type != tokenize.STRING:
+                      continue
+                  prev = sig[i - 1].type if i else tokenize.NEWLINE
+                  nxt = sig[i + 1].type if i + 1 < len(sig) else tokenize.ENDMARKER
+                  if prev in (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT) and nxt in (tokenize.NEWLINE,
+                                                                                             tokenize.ENDMARKER):
+                      spans.append((t.start, t.end))
+              chars = list(text)
+              for (r0, c0), (r1, c1) in spans:
+                  for k in range(starts[r0 - 1] + c0, min(starts[r1 - 1] + c1, len(chars))):
+                      if chars[k] != "\n":
+                          chars[k] = " "
+              return "".join(chars)
+
+
+          def _cut_inline(line, js):
+              """Drop a trailing comment outside quotes: `//` for JS, `#` at a word start for shell/yaml/env/unit."""
+              q, i = None, 0
+              while i < len(line):
+                  c = line[i]
+                  if q:
+                      if c == "\\" and (js or q != "'"):
+                          i += 2
+                          continue
+                      if c == q:
+                          q = None
+                  elif c in "\"'" or (js and c == "`"):
+                      q = c
+                  elif c == "\\":
+                      i += 2
+                      continue
+                  elif js and line.startswith("//", i):
+                      return line[:i]
+                  elif not js and c == "#" and (i == 0 or line[i - 1] in " \t;"):
+                      return line[:i]
+                  i += 1
+              return line
+
+
           def strip_comments(text, ext=""):
-              """Blank comments (whole-line #, //, <!--; JS /* */ blocks; python docstrings / triple-quoted text),
-              keeping line numbers. Prose ABOUT the knobs is not an env the CLI reads."""
+              """Blank comments in every syntax the scanner reads (whole-line and trailing #, //, JS /* */ blocks,
+              XML <!-- -->, python comments + docstrings), keeping line numbers. Prose ABOUT the knobs or the seed is
+              not an env the CLI reads and not a seed step; string literals that are not docstrings stay code."""
               if ext == ".py":
-                  text = TRIPLE_RE.sub(_keep_lines, text)
-              elif ext in (".js", ".mjs", ".cjs", ".ts", ".tsx"):
+                  text = _strip_py(text)
+              elif ext in JS_EXT:
                   text = BLOCK_RE.sub(_keep_lines, text)
-              return "\n".join("" if COMMENT_RE.match(l) else l for l in text.split("\n"))
+              elif ext == ".plist":
+                  text = XML_COMMENT_RE.sub(_keep_lines, text)
+              out = []
+              for l in text.split("\n"):
+                  if COMMENT_RE.match(l):
+                      out.append("")
+                  elif ext == ".py" or ext == ".plist":
+                      out.append(l)
+                  else:
+                      out.append(_cut_inline(l, ext in JS_EXT))
+              return "\n".join(out)
 
 
           def line_of(text, pos):
@@ -186,7 +266,7 @@ jobs:
                                   "%s set without %s=1 in the same env block (+-%d lines): the behaviour flags "
                                   "(Monitor tool, fgts, advisor beta, dispatch-id, pasted_content rule) fall to their "
                                   "GrowthBook-off defaults (t_36dcdb33). See %s" % (name, GB, window, NOTE)))
-              if SPAWN_RE.search(code) and not SEED_RE.search(text):
+              if SPAWN_RE.search(code) and not SEED_RE.search(code):
                   ln, name = hits[0]
                   out.append((ln, "ne_seed_missing",
                               "%s set in a file that spawns the claude binary, with no GrowthBook seed step "
@@ -199,7 +279,7 @@ jobs:
 
           def is_candidate(path, name):
               ext = os.path.splitext(name)[1]
-              if ext in SUFFIXES:
+              if name == ".env" or name.startswith(".env.") or ext in SUFFIXES:  # splitext(".env")[1] is ""
                   return True
               if ext:
                   return False
