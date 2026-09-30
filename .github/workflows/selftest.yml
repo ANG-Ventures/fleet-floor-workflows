@@ -78,6 +78,13 @@ jobs:
       working-directory: js-sample
       concurrency-suffix: js
 
+  js_ci_timeout_override:
+    uses: ./.github/workflows/js-ci.yml
+    with:
+      working-directory: js-sample
+      timeout-minutes: 40
+      concurrency-suffix: js-timeout-override
+
   js_type_check:
     uses: ./.github/workflows/js-typecheck.yml
     with:

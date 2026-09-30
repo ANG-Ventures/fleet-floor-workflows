@@ -19,6 +19,10 @@ on:
         description: "Node version for the runner."
         type: string
         default: "20"
+      timeout-minutes:
+        description: "Job timeout in minutes, including installation; override for larger suites."
+        type: number
+        default: 20
       working-directory:
         description: "Dir containing package.json."
         type: string
@@ -44,8 +48,9 @@ jobs:
     name: ci
     runs-on: ${{ inputs.runner }}
     # A hung test (a server that never closes, a port wait with no timeout) must not burn the 6h
-    # default — fail the floor at 20 min so provisioning aborts cleanly instead of polling forever.
-    timeout-minutes: 20
+    # default — fail the floor at the caller's budget (20 min default) so provisioning aborts
+    # cleanly instead of polling forever.
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}

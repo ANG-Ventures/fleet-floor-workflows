@@ -47,6 +47,9 @@ other repositories or reducing test coverage:
 The numeric `timeout-minutes` input is passed directly to the Actions job timeout.
 It does not change pytest selection, concurrency, or failure handling.
 
+JS/TS CI (`js-ci.yml`) accepts the same `timeout-minutes` input (default 20, number,
+optional) for repositories with large serial suites.
+
 ### Default test CI (`test-ci.yml`, job `test`)
 
 For a repo with **no** test/build CI on pull requests (ci-speed-lint R15 lists them daily). One
