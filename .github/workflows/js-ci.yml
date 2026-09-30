@@ -31,6 +31,10 @@ on:
         description: "Disambiguator when one workflow calls this reusable workflow more than once."
         type: string
         default: ""
+      timeout-minutes:
+        description: "Job timeout in minutes, including installation; override for larger suites."
+        type: number
+        default: 20
 
 permissions:
   contents: read
@@ -45,7 +49,9 @@ jobs:
     runs-on: ${{ inputs.runner }}
     # A hung test (a server that never closes, a port wait with no timeout) must not burn the 6h
     # default — fail the floor at 20 min so provisioning aborts cleanly instead of polling forever.
-    timeout-minutes: 20
+    # A large serial suite opts into a longer budget via the numeric `timeout-minutes` input in its
+    # reviewed caller PR (same contract as python-ci.yml); the default stays 20 for every other caller.
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
