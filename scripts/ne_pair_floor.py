@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""ne-pair-floor: a repo that turns Claude Code's GrowthBook off must restore what that costs.
+
+Card t_ad5331c9 (fleet floor), evidence t_35418f13 / t_36dcdb33, vault note
+"AI/Infrastructure/Claude Relay/Claude Code — NONESSENTIAL_TRAFFIC disables prompt caching- mechanism,
+cost, the fix (2026-09-30)".
+
+The GrowthBook-off FAMILY (any one turns flag evaluation off in the genuine `claude` binary, same gate):
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, DISABLE_TELEMETRY, DISABLE_GROWTHBOOK, DO_NOT_TRACK
+With GrowthBook off, tengu_lapis_anchor falls back to "padded-countdown" and tengu_basalt_spur to false;
+together they move the conversation cache breakpoint onto a block that shifts every turn, so Opus and
+Sonnet 5.5 re-write the whole conversation each turn (replay turn-3 write/read NE 3,453/11,620 vs stock
+22/15,243 on Sonnet; Haiku immune).
+
+Checks (per file; "env block" = within --window lines of the family assignment):
+  ne_tt_reminder  family set without CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off   (BILLING, cache-independent)
+  ne_gb_pair      family set without CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF=1 (BEHAVIOUR flags)
+  ne_seed_missing family set + a spawn of the claude binary in the same file, and no GrowthBook seed step
+                  (cachedGrowthBookFeatures / seed_gb_cache / cfp_gb_seed_gate) in that file: the GB_DISK
+                  pair reads an EMPTY cache in a fresh CLAUDE_CONFIG_DIR and is then inert.
+DO_NOT_TRACK / DISABLE_TELEMETRY are generic names other tools read too; they count only in a file
+that mentions `claude`.
+
+Allowlist: `.ne-pair-floor-allow` at the repo root (and/or --allow-text), one entry per line:
+    <path-glob> <check|*> <reason, >= 10 chars>
+e.g. `tools/probe_once.sh ne_seed_missing single-turn probe: caching cannot matter on turn 1`.
+An entry with no reason FAILs (allowlist_bad); an entry that suppresses nothing WARNs (allowlist_stale).
+
+Exit 1 on any FAIL. Stdlib only. Keep byte-identical with the copy embedded in
+.github/workflows/ne-pair-floor.yml (tests/test_ne_pair_floor.py enforces it).
+"""
+import argparse
+import fnmatch
+import os
+import re
+import sys
+
+NOTE = ("vault note 'Claude Code — NONESSENTIAL_TRAFFIC disables prompt caching- mechanism, cost, "
+        "the fix (2026-09-30)'")
+FAMILY = ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_TELEMETRY", "DISABLE_GROWTHBOOK", "DO_NOT_TRACK")
+GENERIC = ("DISABLE_TELEMETRY", "DO_NOT_TRACK")  # count only in a file that mentions claude
+GB = "CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF"
+TT = "CLAUDE_CODE_TOTAL_TOKENS_REMINDER"
+TRUTHY = r"(?:1|true|True|TRUE|yes|on)"
+ALLOW_FILE = ".ne-pair-floor-allow"
+CHECKS = ("ne_tt_reminder", "ne_gb_pair", "ne_seed_missing")
+
+SUFFIXES = {".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".yml", ".yaml",
+            ".plist", ".service", ".env"}
+PRUNE = {".git", "node_modules", "vendor", "dist", "build", ".venv", "venv", "__pycache__", ".tox",
+         ".mypy_cache", ".pytest_cache", ".worktrees"}
+MAX_BYTES = 2_000_000
+
+
+def _assign(names, value):
+    alt = "|".join(re.escape(n) for n in names)
+    # shell `X=1` / `export X=1` / systemd `Environment=X=1`, python `env["X"] = "1"` / `X="1"` kwarg /
+    # `setdefault("X", "1")`, js/yaml `X: '1'`, plist <key>X</key><string>1</string>.
+    return re.compile(
+        r"(?<![A-Za-z0-9_])(" + alt + r")[\"'\]]{0,2}\s*(?:=|:|,)\s*[\"']?" + value + r"(?![A-Za-z0-9_])"
+        r"|<key>\s*(" + alt + r")\s*</key>\s*<string>\s*" + value + r"\s*</string>")
+
+
+FAMILY_RE = _assign(FAMILY, TRUTHY)
+GB_RE = _assign((GB,), TRUTHY)
+TT_RE = _assign((TT,), r"off")
+SEED_RE = re.compile(r"cachedGrowthBookFeatures|seed_gb_cache|seedGbCache|seed-gb-cache|cfp_gb_seed_gate")
+SPAWN_RE = re.compile(
+    r"(?:spawn|spawnSync|execFile|execFileSync|execa|Popen|subprocess\.(?:run|call|check_call|check_output)"
+    r"|os\.exec\w*)\s*\(\s*\[?\s*[\"'`](?:[^\"'`\s]*/)?claude[\"'`]"      # spawn("claude", ...) / Popen(["claude"
+    r"|[\[(,]\s*[\"'](?:[^\"'\s]*/)?claude[\"']\s*,\s*[\"']-(?:p|-print|-resume|-model|-output-format)"  # argv list
+    r"|(?:^|[\s;&|(`]|\$\()(?:exec\s+|command\s+)?(?:[\w./~${}-]*/)?claude\s+(?:-p\b|--print\b|--resume\b|--model\b|--output-format\b|--setting-sources)"
+    r"|\"?\$\{?CLAUDE_BIN\b",
+    re.M)
+COMMENT_RE = re.compile(r"^\s*(?:#(?!!)|//|<!--|\*\s|/\*)")
+
+
+TRIPLE_RE = re.compile(r"(\"\"\"|\'\'\')[\s\S]*?\1")
+BLOCK_RE = re.compile(r"/\*[\s\S]*?\*/")
+
+
+def _keep_lines(m):
+    return "\n" * m.group(0).count("\n")
+
+
+def strip_comments(text, ext=""):
+    """Blank comments (whole-line #, //, <!--; JS /* */ blocks; python docstrings / triple-quoted text),
+    keeping line numbers. Prose ABOUT the knobs is not an env the CLI reads."""
+    if ext == ".py":
+        text = TRIPLE_RE.sub(_keep_lines, text)
+    elif ext in (".js", ".mjs", ".cjs", ".ts", ".tsx"):
+        text = BLOCK_RE.sub(_keep_lines, text)
+    return "\n".join("" if COMMENT_RE.match(l) else l for l in text.split("\n"))
+
+
+def line_of(text, pos):
+    return text.count("\n", 0, pos) + 1
+
+
+def scan_text(text, window=40, ext=""):
+    """Pure. -> list of (line, check, detail) for one file's text (ext picks the comment syntax)."""
+    code = strip_comments(text, ext)
+    mentions_claude = "claude" in code.lower()
+    lines = code.split("\n")
+    hits = []
+    for m in FAMILY_RE.finditer(code):
+        name = m.group(1) or m.group(2)
+        if name in GENERIC and not mentions_claude:
+            continue
+        hits.append((line_of(code, m.start()), name))
+    if not hits:
+        return []
+    out = []
+    for ln, name in hits:
+        lo, hi = max(0, ln - 1 - window), min(len(lines), ln + window)
+        block = "\n".join(lines[lo:hi])
+        if not TT_RE.search(block):
+            out.append((ln, "ne_tt_reminder",
+                        "%s set without %s=off in the same env block (+-%d lines): GrowthBook-off defaults "
+                        "(tengu_lapis_anchor=padded-countdown + tengu_basalt_spur=false) re-write the whole "
+                        "conversation every turn on Opus AND Sonnet 5.5 (replay turn-3 write/read 3,453/11,620 "
+                        "vs 22/15,243 stock; t_36dcdb33). %s=off restores the read with no flag cache. See %s"
+                        % (name, TT, window, TT, NOTE)))
+        if not GB_RE.search(block):
+            out.append((ln, "ne_gb_pair",
+                        "%s set without %s=1 in the same env block (+-%d lines): the behaviour flags "
+                        "(Monitor tool, fgts, advisor beta, dispatch-id, pasted_content rule) fall to their "
+                        "GrowthBook-off defaults (t_36dcdb33). See %s" % (name, GB, window, NOTE)))
+    if SPAWN_RE.search(code) and not SEED_RE.search(text):
+        ln, name = hits[0]
+        out.append((ln, "ne_seed_missing",
+                    "%s set in a file that spawns the claude binary, with no GrowthBook seed step "
+                    "(cachedGrowthBookFeatures / seed_gb_cache / cfp_gb_seed_gate): %s reads an empty cache "
+                    "in a fresh CLAUDE_CONFIG_DIR and is inert, and NE sessions never refresh it. Seed from a "
+                    "stock-refreshed config (refuse > 7 d, warn > 24 h, assert lapis_anchor=off + "
+                    "basalt_spur=true), or allowlist a single-turn probe with a reason. See %s" % (name, GB, NOTE)))
+    return out
+
+
+def is_candidate(path, name):
+    ext = os.path.splitext(name)[1]
+    if ext in SUFFIXES:
+        return True
+    if ext:
+        return False
+    try:
+        with open(path, "rb") as f:
+            head = f.read(128)
+    except OSError:
+        return False
+    return head.startswith(b"#!") and re.search(rb"sh|python|node|bun|deno", head.split(b"\n")[0]) is not None
+
+
+def iter_files(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in PRUNE)
+        for fn in sorted(filenames):
+            p = os.path.join(dirpath, fn)
+            if os.path.islink(p) or not is_candidate(p, fn):
+                continue
+            try:
+                if os.path.getsize(p) > MAX_BYTES:
+                    continue
+            except OSError:
+                continue
+            yield os.path.relpath(p, root).replace(os.sep, "/"), p
+
+
+def parse_allow(text, origin):
+    entries, bad = [], []
+    for i, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 2)
+        if len(parts) < 3 or len(parts[2].strip()) < 10 or (parts[1] != "*" and parts[1] not in CHECKS):
+            bad.append("%s:%d: %r (want `<path-glob> <%s|*> <reason, >= 10 chars>`)"
+                       % (origin, i, line, "|".join(CHECKS)))
+            continue
+        entries.append({"glob": parts[0], "check": parts[1], "reason": parts[2].strip(),
+                        "where": "%s:%d" % (origin, i), "used": False})
+    return entries, bad
+
+
+def allowed(entries, rel, check):
+    hit = False
+    for e in entries:
+        if (e["check"] in ("*", check)) and fnmatch.fnmatchcase(rel, e["glob"]):
+            e["used"] = True
+            hit = True
+    return hit
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("root", nargs="?", default=".")
+    ap.add_argument("--window", type=int, default=40)
+    ap.add_argument("--allow-text", default=os.environ.get("NE_PAIR_FLOOR_ALLOW", ""))
+    ap.add_argument("--github", action="store_true", help="emit ::error/::warning annotations")
+    a = ap.parse_args(argv)
+    root = os.path.abspath(a.root)
+    entries, bad = [], []
+    af = os.path.join(root, ALLOW_FILE)
+    if os.path.isfile(af):
+        with open(af, encoding="utf-8") as f:
+            e, b = parse_allow(f.read(), ALLOW_FILE)
+        entries += e
+        bad += b
+    if a.allow_text.strip():
+        e, b = parse_allow(a.allow_text, "input:allowlist")
+        entries += e
+        bad += b
+    fails, warns, suppressed, scanned = [], [], 0, 0
+    for msg in bad:
+        fails.append((ALLOW_FILE, 1, "allowlist_bad", msg))
+    for rel, p in iter_files(root):
+        scanned += 1
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if not any(n in text for n in FAMILY):
+            continue
+        for ln, check, detail in scan_text(text, a.window, os.path.splitext(rel)[1]):
+            if allowed(entries, rel, check):
+                suppressed += 1
+                continue
+            fails.append((rel, ln, check, detail))
+    for e in entries:
+        if not e["used"]:
+            warns.append((ALLOW_FILE, 1, "allowlist_stale",
+                          "%s `%s %s` suppresses nothing: drop it" % (e["where"], e["glob"], e["check"])))
+    for rel, ln, check, detail in fails:
+        print("FAIL %s:%d %s %s" % (rel, ln, check, detail))
+        if a.github:
+            print("::error file=%s,line=%d,title=ne-pair-floor %s::%s" % (rel, ln, check, detail.replace("\n", " ")))
+    for rel, ln, check, detail in warns:
+        print("WARN %s %s %s" % (rel, check, detail))
+        if a.github:
+            print("::warning file=%s,title=ne-pair-floor %s::%s" % (rel, check, detail))
+    print("ne-pair-floor: %d files scanned, %d FAIL, %d WARN, %d allowlisted"
+          % (scanned, len(fails), len(warns), suppressed))
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
