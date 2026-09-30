@@ -1,0 +1,2 @@
+# path-glob check reason
+probe_once.sh ne_seed_missing single-turn probe: caching cannot matter on turn 1 (sample entry)

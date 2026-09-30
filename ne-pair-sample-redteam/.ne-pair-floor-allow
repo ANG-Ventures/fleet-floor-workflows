@@ -1,0 +1,2 @@
+# an entry with no reason is itself a FAIL (allowlist_bad)
+no_seed.py ne_seed_missing

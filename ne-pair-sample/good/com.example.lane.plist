@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC</key>
+    <string>1</string>
+    <key>CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF</key>
+    <string>1</string>
+    <key>CLAUDE_CODE_TOTAL_TOKENS_REMINDER</key>
+    <string>off</string>
+  </dict>
+</dict></plist>

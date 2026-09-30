@@ -119,3 +119,17 @@ changes are human-reviewed and never auto-merged. A malicious commit here change
 reviewed SHA-bump caller PR lands in a target repo.
 
 # floor v1: provisioning + Phase-2 live-proven 2026-06-30
+
+### NE-pair floor (`ne-pair-floor.yml`, job `ne_pair_floor`)
+
+Card t_ad5331c9. Any of the GrowthBook-off family — `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
+`DISABLE_TELEMETRY`, `DISABLE_GROWTHBOOK`, `DO_NOT_TRACK` (the last two generic names count only in a file that
+mentions `claude`) — set in shell/py/js/ts/yaml/plist/systemd FAILs unless the same env block (±40 lines) also sets
+`CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off` (`ne_tt_reminder`, billing: Opus + Sonnet 5.5 re-write the conversation
+every turn) and `CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF=1` (`ne_gb_pair`, behaviour flags); a file that also
+spawns the claude binary needs a GrowthBook seed step (`ne_seed_missing`). Full-tree scan, not diff-scoped.
+Opt-outs: `.ne-pair-floor-allow` at the repo root, `<path-glob> <check|*> <reason>` per line (no reason = FAIL,
+unused entry = WARN). Scanner source: `scripts/ne_pair_floor.py`, embedded in the workflow byte-for-byte.
+Caller: [`templates/ne-pair-floor.yml`](templates/ne-pair-floor.yml). Contract + red/green cases:
+`tests/test_ne_pair_floor.py`. Why: vault note "Claude Code — NONESSENTIAL_TRAFFIC disables prompt caching-
+mechanism, cost, the fix (2026-09-30)".

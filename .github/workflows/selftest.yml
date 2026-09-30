@@ -241,6 +241,16 @@ jobs:
     with:
       concurrency-suffix: selftest
 
+  # --- NE-pair floor (ne-pair-floor.yml, t_ad5331c9): GrowthBook-off family => TOTAL_TOKENS_REMINDER=off +
+  # GB_DISK pair + seed step. The red/green contract (every violation shape RED on ne-pair-sample-redteam/, the
+  # embedded scanner == scripts/ne_pair_floor.py) runs in timeout_contract (tests/test_ne_pair_floor.py); this
+  # proves the reusable workflow itself runs GREEN on a real runner over the clean sample.
+  ne_pair_floor:
+    uses: ./.github/workflows/ne-pair-floor.yml
+    with:
+      path: ne-pair-sample/good
+      concurrency-suffix: selftest
+
   # --- default TEST floor (test-ci.yml, t_1f7fff87): the language-detected `test` job a repo with no
   # test CI gets. One caller per sample so each branch goes green on a real runner: python ->
   # pytest, js -> npm test, generic (shell/Makefile/HTML) -> bash -n.
