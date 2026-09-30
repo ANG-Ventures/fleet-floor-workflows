@@ -1,0 +1,28 @@
+# NE-pair floor — thin caller (t_ad5331c9). Any GrowthBook-off knob (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC,
+# DISABLE_TELEMETRY, DISABLE_GROWTHBOOK, DO_NOT_TRACK) must ship with CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off +
+# CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF=1 in the same env block, and a claude spawn with a GrowthBook seed step.
+# Copy to .github/workflows/ne-pair-floor.yml. Pin `uses:` to an IMMUTABLE 40-hex commit SHA of
+# ANG-Ventures/fleet-floor-workflows (never a moving tag). Opt-outs: `.ne-pair-floor-allow` at the repo root,
+# one `<path-glob> <check|*> <reason>` per line (a single-turn probe may opt out of ne_seed_missing: caching
+# cannot matter on turn 1).
+#
+# Placeholders:
+#   __FLOOR_SHA__   40-char commit SHA of the central repo
+#   __RUNNER__      private ANG-Ventures repo: ${{ vars.CI_RUNNER || 'blacksmith-2vcpu-ubuntu-2404' }}.
+#                   Public or Kyzcreig repo: ubuntu-latest.
+name: ne-pair-floor
+
+# path-filter-exempt: a full-tree floor; a path filter would let a PR that only adds a spawn skip it.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ne_pair_floor:
+    uses: ANG-Ventures/fleet-floor-workflows/.github/workflows/ne-pair-floor.yml@__FLOOR_SHA__
+    with:
+      runner: __RUNNER__

@@ -1,0 +1,5 @@
+<plist version="1.0"><dict><key>EnvironmentVariables</key><dict>
+<key>DO_NOT_TRACK</key>
+<string>1</string>
+<key>ProgramArguments</key><string>/usr/local/bin/claude-lane</string>
+</dict></dict></plist>
