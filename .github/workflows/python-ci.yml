@@ -104,9 +104,20 @@ jobs:
           IMPORT: ${{ inputs.import-name }}
         run: |
           set -euo pipefail
-          if [ -n "$TESTS" ] && [ -d "$TESTS" ] && find "$TESTS" \( -name 'test_*.py' -o -name '*_test.py' \) | grep -q .; then
+          # Detection MUST be pipefail-safe: the old `find | grep -q .` raced (grep -q exits on the first
+          # match, find takes SIGPIPE -> 141 -> pipefail flips the condition FALSE -> a repo WITH tests
+          # took import-smoke and went vacuously green; t_7146a779). `-print -quit`: no pipe, find exits 0.
+          found=""
+          if [ -n "$TESTS" ] && [ -d "$TESTS" ]; then
+            found="$(find "$TESTS" \( -name 'test_*.py' -o -name '*_test.py' \) -print -quit)"
+          fi
+          if [ -n "$found" ]; then
             echo "tests present -> pytest ($TESTS) [strength=real]"
             python -m pytest "$TESTS" -q
+          elif [ -n "$TESTS" ] && [ -d "$TESTS" ] && python3 -c 'import pathlib, sys; d = pathlib.Path(sys.argv[1]); sys.exit(0 if next(d.rglob("test_*.py"), None) or next(d.rglob("*_test.py"), None) else 1)' "$TESTS"; then
+            # Independent re-check: a weak branch over a dir that holds test files is a hard failure.
+            echo "::error::$TESTS contains test files but detection chose the weak branch; refusing a vacuous green"
+            exit 1
           elif [ -z "$IMPORT" ]; then
             echo "::notice::no tests and no import-name given; ci is a green no-op [strength=weak]"
             exit 0
