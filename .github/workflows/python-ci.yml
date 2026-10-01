@@ -27,6 +27,10 @@ on:
         description: "Tests directory (relative to working-directory)."
         type: string
         default: "tests"
+      pytest-workers:
+        description: "Opt-in pytest-xdist worker count ('auto' or a positive integer); empty = serial pytest."
+        type: string
+        default: ""
       import-name:
         description: "Module to import-smoke when there are no tests (e.g. 'mypkg')."
         type: string
@@ -74,6 +78,7 @@ jobs:
       - name: Install package
         env:
           INSTALL_CMD: ${{ inputs.install }}
+          PYTEST_WORKERS: ${{ inputs.pytest-workers }}
         run: |
           python -m pip install --upgrade pip
           if [ -n "$INSTALL_CMD" ]; then
@@ -97,13 +102,25 @@ jobs:
             echo "no python package metadata; nothing to install"
           fi
           pip install pytest
+          if [ -n "${PYTEST_WORKERS:-}" ]; then
+            pip install pytest-xdist
+          fi
 
       - name: Run tests (pytest) or import-smoke
         env:
           TESTS: ${{ inputs.tests-path }}
           IMPORT: ${{ inputs.import-name }}
+          PYTEST_WORKERS: ${{ inputs.pytest-workers }}
         run: |
           set -euo pipefail
+          # Opt-in parallelism for suites that outgrow the job timeout when run serially (t_90c7065d).
+          xdist=()
+          case "${PYTEST_WORKERS:-}" in
+            "") ;;
+            auto) xdist=(-n auto) ;;
+            *[!0-9]*|0*) echo "::error::pytest-workers must be 'auto' or a positive integer, got '${PYTEST_WORKERS}'"; exit 1 ;;
+            *) xdist=(-n "$PYTEST_WORKERS") ;;
+          esac
           # Detection MUST be pipefail-safe: the old `find | grep -q .` raced (grep -q exits on the first
           # match, find takes SIGPIPE -> 141 -> pipefail flips the condition FALSE -> a repo WITH tests
           # took import-smoke and went vacuously green; t_7146a779). `-print -quit`: no pipe, find exits 0.
@@ -113,7 +130,7 @@ jobs:
           fi
           if [ -n "$found" ]; then
             echo "tests present -> pytest ($TESTS) [strength=real]"
-            python -m pytest "$TESTS" -q
+            python -m pytest "$TESTS" -q ${xdist[@]+"${xdist[@]}"}
           elif [ -n "$TESTS" ] && [ -d "$TESTS" ] && python3 -c 'import pathlib, sys; d = pathlib.Path(sys.argv[1]); sys.exit(0 if next(d.rglob("test_*.py"), None) or next(d.rglob("*_test.py"), None) else 1)' "$TESTS"; then
             # Independent re-check: a weak branch over a dir that holds test files is a hard failure.
             echo "::error::$TESTS contains test files but detection chose the weak branch; refusing a vacuous green"

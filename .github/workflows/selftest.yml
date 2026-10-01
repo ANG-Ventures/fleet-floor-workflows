@@ -33,6 +33,17 @@ jobs:
       timeout-minutes: 40
       concurrency-suffix: py-timeout-override
 
+  # Opt-in pytest-xdist parallelism (ha-command-router: ~52 min serial vs the 60-min cap,
+  # t_90c7065d). Locked by tests/test_python_ci_workers.py.
+  ci_pytest_workers:
+    uses: ./.github/workflows/python-ci.yml
+    with:
+      working-directory: sample
+      tests-path: tests
+      import-name: sample_pkg
+      pytest-workers: auto
+      concurrency-suffix: py-pytest-workers
+
   timeout_contract:
     runs-on: ubuntu-latest
     timeout-minutes: 5
