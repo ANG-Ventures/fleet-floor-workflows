@@ -47,6 +47,19 @@ other repositories or reducing test coverage:
 The numeric `timeout-minutes` input is passed directly to the Actions job timeout.
 It does not change pytest selection, concurrency, or failure handling.
 
+A suite whose serial runtime approaches the cap can opt into pytest-xdist instead of only
+raising the budget. `pytest-workers` takes `auto` or a positive integer; empty (the default)
+keeps serial pytest. The workflow installs `pytest-xdist` only when it is set, and any other
+value fails the job. Use it only if the suite is safe to run in parallel (no shared fixed paths
+or ports across test files):
+
+```yaml
+    with:
+      import-name: mypkg
+      runner: blacksmith-4vcpu-ubuntu-2404
+      pytest-workers: auto
+```
+
 JS/TS CI (`js-ci.yml`) takes the same numeric `timeout-minutes` input with the same
 20-minute default, for a serial test suite that outgrows the floor's hung-test guard:
 
