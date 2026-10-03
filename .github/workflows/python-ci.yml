@@ -2,6 +2,13 @@
 # Part of the fleet-floor (greploop posture-B). Called via `uses:` + an immutable SHA.
 # Emits a check-run whose internal job name is the literal floor component `ci`
 # (frozen contract — renaming this job is a breaking fleet-wide change; see spec D-12).
+#
+# SHARDING (t_a9a0e768, mirrors js-ci.yml's `shards`): `shards: N` (default 1) fans the pytest run out
+# into N matrix jobs `ci (i/N)`. Each job collects the WHOLE suite exactly as before and keeps every
+# N-th collected test (round-robin over pytest's collection order, an inline plugin; no new dependency),
+# so the union of the shards is the whole suite and no test runs twice. shards=1 keeps one job named
+# `ci` running the exact pre-shard command. A caller whose required check is `ci / ci` adds a fan-in
+# job named `ci / ci` that is green only when every shard succeeded (README "Sharding Python tests").
 name: floor-ci
 
 on:
@@ -31,6 +38,12 @@ on:
         description: "Opt-in pytest-xdist worker count ('auto' or a positive integer); empty = serial pytest."
         type: string
         default: ""
+      shards:
+        description: >-
+          Number of parallel test jobs (1-16). 1 = one job named `ci` (unchanged); N > 1 = N jobs
+          `ci (i/N)`, each running every N-th collected test (offset i-1).
+        type: number
+        default: 1
       import-name:
         description: "Module to import-smoke when there are no tests (e.g. 'mypkg')."
         type: string
@@ -53,7 +66,16 @@ concurrency:
 
 jobs:
   ci:
-    name: ci
+    # shards=1 -> exactly `ci` (frozen check-run contract). The name references matrix.shard, so GitHub
+    # does not append the matrix value to it.
+    name: ${{ inputs.shards > 1 && format('ci ({0}/{1})', matrix.shard, inputs.shards) || 'ci' }}
+    strategy:
+      # Every shard reports; one red shard must not hide another's result.
+      fail-fast: false
+      matrix:
+        # Expressions have no range(); an out-of-range `shards` resolves to null and the run fails
+        # to start (loud), never to a silently smaller matrix. Same table as js-ci.yml.
+        shard: ${{ fromJSON('{"1":[1],"2":[1,2],"3":[1,2,3],"4":[1,2,3,4],"5":[1,2,3,4,5],"6":[1,2,3,4,5,6],"7":[1,2,3,4,5,6,7],"8":[1,2,3,4,5,6,7,8],"9":[1,2,3,4,5,6,7,8,9],"10":[1,2,3,4,5,6,7,8,9,10],"11":[1,2,3,4,5,6,7,8,9,10,11],"12":[1,2,3,4,5,6,7,8,9,10,11,12],"13":[1,2,3,4,5,6,7,8,9,10,11,12,13],"14":[1,2,3,4,5,6,7,8,9,10,11,12,13,14],"15":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],"16":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]}')[format('{0}', inputs.shards)] }}
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     defaults:
@@ -111,6 +133,8 @@ jobs:
           TESTS: ${{ inputs.tests-path }}
           IMPORT: ${{ inputs.import-name }}
           PYTEST_WORKERS: ${{ inputs.pytest-workers }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: ${{ inputs.shards }}
         run: |
           set -euo pipefail
           # Opt-in parallelism for suites that outgrow the job timeout when run serially (t_90c7065d).
@@ -121,6 +145,30 @@ jobs:
             *[!0-9]*|0*) echo "::error::pytest-workers must be 'auto' or a positive integer, got '${PYTEST_WORKERS}'"; exit 1 ;;
             *) xdist=(-n "$PYTEST_WORKERS") ;;
           esac
+          # shards=1 -> no shard argument at all (the pre-shard command, unchanged). N > 1 -> an inline
+          # plugin keeps every N-th collected item (offset i-1) and deselects the rest. Collection order
+          # is deterministic, so the N shards partition the suite. A shard left with no tests makes
+          # pytest exit 5 (red), never a vacuous green.
+          shard=()
+          if [ "${SHARD_TOTAL:-1}" != "1" ]; then
+            echo "shard ${SHARD_INDEX}/${SHARD_TOTAL}"
+            plugdir="${RUNNER_TEMP:-/tmp}/floor-ci-shard"
+            mkdir -p "$plugdir"
+            printf '%s\n' \
+              'import os' \
+              '' \
+              '' \
+              'def pytest_collection_modifyitems(config, items):' \
+              '    index, total = int(os.environ["SHARD_INDEX"]), int(os.environ["SHARD_TOTAL"])' \
+              '    keep = [it for n, it in enumerate(items) if n % total == index - 1]' \
+              '    drop = [it for n, it in enumerate(items) if n % total != index - 1]' \
+              '    if drop:' \
+              '        config.hook.pytest_deselected(items=drop)' \
+              '    items[:] = keep' \
+              > "$plugdir/floor_ci_shard.py"
+            export PYTHONPATH="$plugdir${PYTHONPATH:+:$PYTHONPATH}"
+            shard=(-p floor_ci_shard)
+          fi
           # Detection MUST be pipefail-safe: the old `find | grep -q .` raced (grep -q exits on the first
           # match, find takes SIGPIPE -> 141 -> pipefail flips the condition FALSE -> a repo WITH tests
           # took import-smoke and went vacuously green; t_7146a779). `-print -quit`: no pipe, find exits 0.
@@ -130,7 +178,7 @@ jobs:
           fi
           if [ -n "$found" ]; then
             echo "tests present -> pytest ($TESTS) [strength=real]"
-            python -m pytest "$TESTS" -q ${xdist[@]+"${xdist[@]}"}
+            python -m pytest "$TESTS" -q ${xdist[@]+"${xdist[@]}"} ${shard[@]+"${shard[@]}"}
           elif [ -n "$TESTS" ] && [ -d "$TESTS" ] && python3 -c 'import pathlib, sys; d = pathlib.Path(sys.argv[1]); sys.exit(0 if next(d.rglob("test_*.py"), None) or next(d.rglob("*_test.py"), None) else 1)' "$TESTS"; then
             # Independent re-check: a weak branch over a dir that holds test files is a hard failure.
             echo "::error::$TESTS contains test files but detection chose the weak branch; refusing a vacuous green"

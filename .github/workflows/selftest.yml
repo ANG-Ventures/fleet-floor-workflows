@@ -44,6 +44,16 @@ jobs:
       pytest-workers: auto
       concurrency-suffix: py-pytest-workers
 
+  # Opt-in python-ci shards (t_a9a0e768). Locked by tests/test_python_ci_shards.py.
+  ci_shards:
+    uses: ./.github/workflows/python-ci.yml
+    with:
+      working-directory: sample
+      tests-path: tests
+      import-name: sample_pkg
+      shards: 2
+      concurrency-suffix: py-shards
+
   timeout_contract:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -279,6 +289,40 @@ jobs:
     with:
       path: ne-pair-sample/good
       concurrency-suffix: selftest
+
+  # Steps-mode composite actions (t_a9a0e768): ONE job runs both floor lints as steps, the shape a
+  # caller uses to stop paying a whole billed minute per lint. Green on the clean sample, RED on the
+  # red-team tree (the action must keep its teeth), and override-lint passes on this repo's own PRs.
+  floor_steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 2
+      - name: ne-pair-floor (steps mode) on the clean sample
+        uses: ./.github/actions/ne-pair-floor
+        with:
+          path: ne-pair-sample/good
+      - name: ne-pair-floor (steps mode) on the red-team tree
+        id: ne_red
+        continue-on-error: true
+        uses: ./.github/actions/ne-pair-floor
+        with:
+          path: ne-pair-sample-redteam
+      - name: The red-team tree must go red
+        env:
+          OUTCOME: ${{ steps.ne_red.outcome }}
+        run: |
+          echo "red-team outcome: $OUTCOME"
+          test "$OUTCOME" = failure
+      - name: override-lint (steps mode)
+        uses: ./.github/actions/override-lint
+        with:
+          github-token: ${{ github.token }}
 
   # --- default TEST floor (test-ci.yml, t_1f7fff87): the language-detected `test` job a repo with no
   # test CI gets. One caller per sample so each branch goes green on a real runner: python ->
