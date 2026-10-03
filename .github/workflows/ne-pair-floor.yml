@@ -13,7 +13,7 @@
 # so the caller's SHA pin pins the scanner too. Internal job name `ne_pair_floor` is a frozen contract.
 # CALLER `paths:` (a reusable workflow cannot carry its own; README "Caller path filters"): the scan is
 # full-tree but opens only SUFFIXES files, `.env*`, and extension-less shebang scripts, so the caller's
-# filter is `**` minus docs/data/media suffixes with `**/.env*` re-included (templates/ne-pair-floor.yml).
+# filter is `**` minus docs/data/media suffixes with dot-basenames `**/.*` re-included (templates/ne-pair-floor.yml).
 # A commit touching none of those cannot change the result.
 name: floor-ne-pair
 

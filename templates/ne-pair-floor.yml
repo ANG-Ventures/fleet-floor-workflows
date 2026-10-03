@@ -37,8 +37,10 @@ on:
       - '!**.gif'
       - '!**.webp'
       - '!**.pdf'
-      # `.env*` IS scanned whatever its suffix (e.g. `.env.json`): re-included after the negations.
-      - '**/.env*'
+      # Every dot-basename is re-included after the negations: `.env*` is scanned whatever its suffix
+      # (`.env.json`), and a file named exactly `.txt`/`.md`/... has no extension to the scanner
+      # (splitext(".txt")[1] == ""), so it is opened when it carries a shebang (t_62fba842).
+      - '**/.*'
   push:
     branches: [main]
     paths:
@@ -61,8 +63,10 @@ on:
       - '!**.gif'
       - '!**.webp'
       - '!**.pdf'
-      # `.env*` IS scanned whatever its suffix (e.g. `.env.json`): re-included after the negations.
-      - '**/.env*'
+      # Every dot-basename is re-included after the negations: `.env*` is scanned whatever its suffix
+      # (`.env.json`), and a file named exactly `.txt`/`.md`/... has no extension to the scanner
+      # (splitext(".txt")[1] == ""), so it is opened when it carries a shebang (t_62fba842).
+      - '**/.*'
 
 permissions:
   contents: read
