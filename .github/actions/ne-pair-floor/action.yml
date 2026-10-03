@@ -1,0 +1,41 @@
+# Composite (steps-mode) variant of the `ne_pair_floor` floor component (card t_a9a0e768).
+#
+# WHY: Blacksmith bills every job as ceil(runtime) x vCPU (measured 2026-10-03), so the ~10 s
+# reusable-workflow job `ne_pair_floor` bills a full 2 vCPU-minute on every event. A caller that
+# already has a job with a checkout runs this as ONE STEP of that job instead of paying for a job.
+#
+# Same scanner, same command: it runs scripts/ne_pair_floor.py from THIS action's commit, which
+# tests/test_ne_pair_floor.py pins byte-identical to the copy embedded in ne-pair-floor.yml. The
+# reusable workflow .github/workflows/ne-pair-floor.yml is unchanged for callers that do not opt in.
+#
+# Caller contract: check out the repo first (any fetch-depth). Pin `uses:` to a 40-hex commit SHA:
+#   - uses: ANG-Ventures/fleet-floor-workflows/.github/actions/ne-pair-floor@<sha>
+#     with: { path: . }
+name: floor-ne-pair (steps mode)
+description: GrowthBook-off family must carry TOTAL_TOKENS_REMINDER=off + GB_DISK pair + seed step (t_ad5331c9).
+inputs:
+  path:
+    description: "Directory to scan, relative to the job's working directory."
+    required: false
+    default: "."
+  window:
+    description: "Env-block size: partners must sit within this many lines of the family assignment."
+    required: false
+    default: "40"
+  allowlist:
+    description: "Extra allowlist entries, one per line: `<path-glob> <check|*> <reason, >= 10 chars>`."
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: NE pair floor
+      shell: bash
+      env:
+        NE_PATH: ${{ inputs.path }}
+        NE_WINDOW: ${{ inputs.window }}
+        NE_PAIR_FLOOR_ALLOW: ${{ inputs.allowlist }}
+        NE_SCANNER: ${{ github.action_path }}/../../../scripts/ne_pair_floor.py
+      run: |
+        set -euo pipefail
+        python3 "$NE_SCANNER" "$NE_PATH" --window "$NE_WINDOW" --github

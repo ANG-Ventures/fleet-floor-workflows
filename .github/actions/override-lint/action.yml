@@ -1,0 +1,69 @@
+# Composite (steps-mode) variant of the `override_lint` floor component (card t_a9a0e768).
+#
+# WHY: Blacksmith bills every job as ceil(runtime) x vCPU (measured 2026-10-03), so the ~11 s
+# reusable-workflow job `override_lint` bills a full 2 vCPU-minute on every event. A caller that
+# already has a job with a checkout runs this as steps of that job instead of paying for a job.
+#
+# Same lint, same command: scripts/override_lint.py is the `Override lint` step script of
+# override-lint.yml, byte-for-byte (tests/test_override_lint.py pins it). The collect step below is
+# the reusable workflow's `Collect PR diff and body` step with its /tmp files moved under
+# $RUNNER_TEMP. The reusable workflow .github/workflows/override-lint.yml is unchanged for callers
+# that do not opt in. Every step is a no-op on a non-PR event, exactly like the reusable workflow.
+#
+# Caller contract: check out with `fetch-depth: 2` (or 0) so HEAD^1 (the PR base tip) exists; grant
+# `pull-requests: read` so the live PR body is read over REST; pass `github-token`. On a PR body
+# edit the caller must still run this (the reusable caller template listens to `edited`).
+#   - uses: ANG-Ventures/fleet-floor-workflows/.github/actions/override-lint@<sha>
+#     with: { github-token: "${{ github.token }}" }
+name: floor-override-lint (steps mode)
+description: A PR that adds a refusal must name its override, or say none by design (t_8f526b34).
+inputs:
+  github-token:
+    description: "Token that can read the PR (pulls endpoint). Pass github.token."
+    required: true
+  scope:
+    description: >-
+      Whitespace-separated scoped paths. Entries ending in / match that directory at any depth;
+      other entries match a file path exactly or as a path suffix.
+    required: false
+    default: "hermes_cli/ tools/ gateway/ cron/ hooks/ scripts/fleet-merge.sh scripts/gh-shim.py"
+  allowlist:
+    description: "Extra no-override-by-design entries, one per line: `path:<regex> <why>` or `line:<regex> <why>`."
+    required: false
+    default: ""
+  docs-paths:
+    description: "Whitespace-separated dirs/files grepped (*.md) for a named override (warning only)."
+    required: false
+    default: "skills-shared skills"
+runs:
+  using: composite
+  steps:
+    - name: Collect PR diff and body
+      if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        EVENT_BODY: ${{ github.event.pull_request.body }}
+      run: |
+        set -euo pipefail
+        git diff --no-color --no-ext-diff HEAD^1 HEAD > "$RUNNER_TEMP/override-lint.diff"
+        # Live body first, so a re-run after a body edit sees the edit; event payload as fallback.
+        if ! gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.body // ""' > "$RUNNER_TEMP/override-lint.body" 2>/dev/null; then
+          echo "::notice::PR body read over REST failed; using the event payload (re-runs keep the old body)"
+          printf '%s' "$EVENT_BODY" > "$RUNNER_TEMP/override-lint.body"
+        fi
+        echo "diff: $(wc -l < "$RUNNER_TEMP/override-lint.diff") lines; body: $(wc -c < "$RUNNER_TEMP/override-lint.body") bytes"
+
+    - name: Override lint
+      if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+      shell: bash
+      env:
+        OVERRIDE_LINT_SCOPE: ${{ inputs.scope }}
+        OVERRIDE_LINT_ALLOWLIST: ${{ inputs.allowlist }}
+        OVERRIDE_LINT_DOCS: ${{ inputs.docs-paths }}
+        OVERRIDE_LINT_SCRIPT: ${{ github.action_path }}/../../../scripts/override_lint.py
+      run: |
+        set -euo pipefail
+        python3 "$OVERRIDE_LINT_SCRIPT" "$RUNNER_TEMP/override-lint.diff" "$RUNNER_TEMP/override-lint.body"

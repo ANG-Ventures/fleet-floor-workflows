@@ -123,6 +123,61 @@ the per-job setup (checkout + install) is about 30% of a shard's wall time.
 Changing from 1 to N > 1 renames the check from `ci` to `ci (i/N)`. If `ci / ci` is a required check,
 update that requirement in the same caller PR.
 
+### Sharding Python tests (`python-ci.yml` input `shards`)
+
+Same contract as js-ci's `shards`: `shards: N` (1-16, default 1) runs the pytest step as N jobs named
+`ci (1/N)` ... `ci (N/N)`. Each job collects the whole suite as before and keeps every N-th collected
+test (an inline plugin over pytest's collection order, no new dependency), so the shards together run
+every test exactly once. A shard that ends up with no tests is red (pytest exit 5). It composes with
+`pytest-workers` (xdist inside each shard). The default `shards: 1` runs one job named `ci` with the
+same command as before. Contract: `tests/test_python_ci_shards.py`.
+
+Sharding renames the check from `ci` to `ci (i/N)`. A caller whose required check is `ci / ci` keeps
+it with a fan-in job named exactly that (claude-bpx's `fleet-floor.yml` is the working example):
+
+```yaml
+  ci_shards:
+    uses: ANG-Ventures/fleet-floor-workflows/.github/workflows/python-ci.yml@<sha>
+    with:
+      shards: 2
+  ci:
+    name: ci / ci
+    needs: ci_shards
+    if: ${{ always() }}
+    runs-on: ${{ vars.CI_RUNNER || 'blacksmith-2vcpu-ubuntu-2404' }}
+    timeout-minutes: 5
+    steps:
+      - env: { SHARDS_RESULT: "${{ needs.ci_shards.result }}" }
+        run: test "$SHARDS_RESULT" = success
+```
+
+### Steps mode for the sub-minute lints (`.github/actions/ne-pair-floor`, `.github/actions/override-lint`)
+
+Blacksmith bills every job as `ceil(runtime)` minutes x vCPU (measured 2026-10-03 with `blacksmith
+usage`), so a ~10 s `ne_pair_floor` or `override_lint` job bills a full 2 vCPU-minute on every event:
+the cost of a tiny lint is the job's existence. The two composite actions run the same lints as
+**steps** of a job the caller already pays for (card t_a9a0e768). The reusable workflows stay as they
+are; a caller that does not opt in sees no change.
+
+- Same bytes: the actions run `scripts/ne_pair_floor.py` and `scripts/override_lint.py` from the
+  pinned commit, and `tests/test_floor_actions.py` pins both byte-identical to the scripts embedded in
+  the reusable workflows. override-lint's collect step is the workflow's step with `/tmp` moved to
+  `$RUNNER_TEMP`; both steps are no-ops on non-PR events, as in the workflow.
+- Caller contract: check out first (override-lint needs `fetch-depth: 2` for `HEAD^1`), grant
+  `pull-requests: read`, pin the action to a 40-hex SHA. The job id is the caller's, so the check name
+  becomes the host job's name; move a lint this way only when it is not a required check.
+- Path filters move with it: the host job runs on the host workflow's trigger, so gate each step with
+  the host's change classifier (fail open) or accept the wider trigger. The README table above lists
+  what each scanner reads.
+
+```yaml
+      - uses: actions/checkout@<sha>
+        with: { fetch-depth: 2 }
+      - uses: ANG-Ventures/fleet-floor-workflows/.github/actions/ne-pair-floor@<sha>
+      - uses: ANG-Ventures/fleet-floor-workflows/.github/actions/override-lint@<sha>
+        with: { github-token: "${{ github.token }}" }
+```
+
 ### Default test CI (`test-ci.yml`, job `test`)
 
 For a repo with **no** test/build CI on pull requests (ci-speed-lint R15 lists them daily). One
