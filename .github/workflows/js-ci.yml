@@ -6,6 +6,19 @@
 # directory / *.test.* file exist?" — the SAME signal derive_strength(lang="js-ts") sees in a tree
 # listing. NOT the package.json `test` script (content, invisible to the tree read), so the predictor
 # and this workflow can never drift. A contract test binds them on js-sample (AC-P4b-4).
+#
+# CALLER `paths:` (a reusable workflow cannot carry its own; README "Caller path filters"): the test
+# run reads everything under `working-directory`, so the filter is `<working-directory>/**` plus the
+# caller workflow file, minus docs. `paths:` is workflow-level, and the usual caller (fleet-floor.yml)
+# also hosts secret_scan/sast, which must see every path, so filter js-ci through its own caller file
+# or a job-level change classifier (ha-command-router `changes` job), never by adding `paths:` to a
+# fleet-floor.yml that still holds secret_scan.
+#
+# SHARDING: `shards: N` (default 1) fans the test run out into N matrix jobs `ci (i/N)`, each running
+# `node --test --test-shard=i/N` (or `npm test -- --test-shard=i/N` when package.json has a test
+# script; a custom runner must honour that flag). node's shard split is a partition of the test files,
+# so the union of the shards is the whole suite. shards=1 keeps one job named `ci` running the exact
+# pre-shard commands. Size N so per-job setup is ~30% of job wall (Blacksmith bills vCPU-minutes).
 name: floor-js-ci
 
 on:
@@ -35,6 +48,12 @@ on:
         description: "Job timeout in minutes, including installation; override for larger suites."
         type: number
         default: 20
+      shards:
+        description: >-
+          Number of parallel test jobs (1-16). 1 = one job named `ci` (unchanged); N > 1 = N jobs
+          `ci (i/N)`, each running node's `--test-shard=i/N` partition of the test files.
+        type: number
+        default: 1
 
 permissions:
   contents: read
@@ -45,7 +64,16 @@ concurrency:
 
 jobs:
   ci:
-    name: ci
+    # shards=1 -> exactly `ci` (frozen check-run contract). The name references matrix.shard, so GitHub
+    # does not append the matrix value to it.
+    name: ${{ inputs.shards > 1 && format('ci ({0}/{1})', matrix.shard, inputs.shards) || 'ci' }}
+    strategy:
+      # Every shard reports; one red shard must not hide another's result.
+      fail-fast: false
+      matrix:
+        # Expressions have no range(); an out-of-range `shards` resolves to null and the run fails
+        # to start (loud), never to a silently smaller matrix.
+        shard: ${{ fromJSON('{"1":[1],"2":[1,2],"3":[1,2,3],"4":[1,2,3,4],"5":[1,2,3,4,5],"6":[1,2,3,4,5,6],"7":[1,2,3,4,5,6,7],"8":[1,2,3,4,5,6,7,8],"9":[1,2,3,4,5,6,7,8,9],"10":[1,2,3,4,5,6,7,8,9,10],"11":[1,2,3,4,5,6,7,8,9,10,11],"12":[1,2,3,4,5,6,7,8,9,10,11,12],"13":[1,2,3,4,5,6,7,8,9,10,11,12,13],"14":[1,2,3,4,5,6,7,8,9,10,11,12,13,14],"15":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],"16":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]}')[format('{0}', inputs.shards)] }}
     runs-on: ${{ inputs.runner }}
     # A hung test (a server that never closes, a port wait with no timeout) must not burn the 6h
     # default — fail the floor at 20 min so provisioning aborts cleanly instead of polling forever.
@@ -91,8 +119,17 @@ jobs:
           fi
 
       - name: Run tests (path-signal) or smoke
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: ${{ inputs.shards }}
         run: |
           set -euo pipefail
+          # shards=1 -> no shard argument at all (the pre-shard commands, unchanged).
+          shard_args=()
+          if [ "$SHARD_TOTAL" != "1" ]; then
+            shard_args=("--test-shard=${SHARD_INDEX}/${SHARD_TOTAL}")
+            echo "shard ${SHARD_INDEX}/${SHARD_TOTAL}"
+          fi
           # PATH signal (matches derive_strength js-ts): a conventional test dir OR a *.test.*/*.spec.*
           # file outside vendored trees -> real. Detection MUST be deterministic and pipefail-safe:
           # the old `find . | grep -q .` raced (grep -q closes the pipe on first match; find, still
@@ -115,11 +152,15 @@ jobs:
           if [ "$have_tests" = 1 ]; then
             echo "tests present -> running tests [strength=real]"
             if [ -f package.json ] && node -e "process.exit(require('./package.json').scripts?.test?0:1)" 2>/dev/null; then
-              npm test
+              if [ ${#shard_args[@]} -eq 0 ]; then
+                npm test
+              else
+                npm test -- "${shard_args[@]}"
+              fi
             else
               # No test script -> use the zero-dep built-in node test runner over the test dir(s).
               echo "no package.json test script; using node --test"
-              node --test
+              node --test ${shard_args[@]+"${shard_args[@]}"}
             fi
           else
             echo "::notice::no tests -> import/build smoke [strength=weak]"

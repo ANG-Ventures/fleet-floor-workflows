@@ -98,6 +98,15 @@ jobs:
       timeout-minutes: 40
       concurrency-suffix: js-timeout-override
 
+  # Same reusable workflow fanned out into 2 test jobs `ci (1/2)` / `ci (2/2)` (node --test-shard);
+  # js-sample has two test files so each shard runs one. Locked by tests/test_js_ci_shards.py.
+  js_ci_shards:
+    uses: ./.github/workflows/js-ci.yml
+    with:
+      working-directory: js-sample
+      shards: 2
+      concurrency-suffix: js-shards
+
   js_type_check:
     uses: ./.github/workflows/js-typecheck.yml
     with:

@@ -12,11 +12,57 @@
 #                   Public or Kyzcreig repo: ubuntu-latest.
 name: ne-pair-floor
 
-# path-filter-exempt: a full-tree floor; a path filter would let a PR that only adds a spawn skip it.
+# paths: every file type the scanner opens (README "Caller path filters"). A commit that touches only
+# files the scanner never reads cannot change its full-tree result. This caller is a .yml, so it stays
+# in scope: a floor SHA bump always re-runs the scan.
 on:
   pull_request:
+    paths:
+      - '**'
+      # Never opened by the scanner (not in SUFFIXES, no shebang): docs, data, captures, media.
+      - '!**.md'
+      - '!**.json'
+      - '!**.jsonl'
+      - '!**.txt'
+      - '!**.log'
+      - '!**.csv'
+      - '!**.sse'
+      - '!**.patch'
+      - '!**.diff'
+      - '!**.html'
+      - '!**.svg'
+      - '!**.png'
+      - '!**.jpg'
+      - '!**.jpeg'
+      - '!**.gif'
+      - '!**.webp'
+      - '!**.pdf'
+      # `.env*` IS scanned whatever its suffix (e.g. `.env.json`): re-included after the negations.
+      - '**/.env*'
   push:
     branches: [main]
+    paths:
+      - '**'
+      # Never opened by the scanner (not in SUFFIXES, no shebang): docs, data, captures, media.
+      - '!**.md'
+      - '!**.json'
+      - '!**.jsonl'
+      - '!**.txt'
+      - '!**.log'
+      - '!**.csv'
+      - '!**.sse'
+      - '!**.patch'
+      - '!**.diff'
+      - '!**.html'
+      - '!**.svg'
+      - '!**.png'
+      - '!**.jpg'
+      - '!**.jpeg'
+      - '!**.gif'
+      - '!**.webp'
+      - '!**.pdf'
+      # `.env*` IS scanned whatever its suffix (e.g. `.env.json`): re-included after the negations.
+      - '**/.env*'
 
 permissions:
   contents: read

@@ -19,6 +19,10 @@
 # design", or a --flag / ENV_VAR named in the body that the diff itself adds.
 # The PR body is re-read over REST on every run (event payload as fallback), so after editing the
 # body, re-run the job. Internal job name `override_lint` is a frozen contract.
+# CALLER `paths:` (a reusable workflow cannot carry its own; README "Caller path filters"): hits come
+# only from ADDED lines in non-test files with a CODE_EXT suffix or none, so the caller's filter is `**`
+# minus docs/data/config suffixes and test paths, plus the caller file (templates/override-lint.yml).
+# A PR outside that set has no hits and passes without the body; `edited` still fires for PRs inside it.
 name: floor-override-lint
 
 on:
