@@ -71,6 +71,58 @@ JS/TS CI (`js-ci.yml`) takes the same numeric `timeout-minutes` input with the s
       timeout-minutes: 40
 ```
 
+### Caller path filters (`paths:`)
+
+A reusable workflow cannot carry `paths:`; the **caller** decides when it fires. A caller with no
+filter runs its floor on every commit (card t_a1dd1955: >= 6 repos fired every floor job on every
+PR and push). Set the filter below in the caller, on `pull_request` and on `push`. Each filter covers
+every file the floor can read, so a skipped run is one whose result could not have changed. Every
+filter keeps the caller workflow itself in scope, so a SHA bump or input change always re-runs the
+floor (fail-open).
+
+| Floor | Caller `paths:` | Why that set |
+|---|---|---|
+| `ne-pair-floor.yml` | `**` minus docs/data/media suffixes, with `**/.env*` re-included | the scanner opens `.sh .bash .zsh .py .js .mjs .cjs .ts .tsx .yml .yaml .plist .service .env*` and extension-less shebang scripts across the whole tree; never `.md`/`.json`/`.txt`/media |
+| `override-lint.yml` | `**` minus docs/data/config suffixes and test paths, plus the caller file | it reads only ADDED lines in non-test files with a code extension (`.py .sh .bash .js .mjs .cjs .ts .tsx .go .rb .pl`) or none; a PR with none of those has no hits and passes whatever its body says |
+| `js-ci.yml` | `<working-directory>/**` and the caller file, minus `**.md` | the test run reads the package dir (package.json, lockfiles, src, tests) and nothing outside it |
+| `python-ci.yml`, `test-ci.yml` | `<working-directory>/**` and the caller file, minus docs | same reasoning as js-ci |
+| `secret-scan.yml`, `sast.yml` | **none: whole tree** | a secret or a vulnerable pattern can land in any path; `sast` also lints every workflow file |
+
+Two constraints decide where the filter goes:
+
+- `paths:` is **workflow-level**. `fleet-floor.yml` usually hosts `secret_scan` and `sast` next to
+  `ci`, and those need the whole tree. Do not add `paths:` to a `fleet-floor.yml` that still holds
+  them. Either move the test component into its own caller file with the filter, or gate it with a
+  job-level change classifier (ha-command-router's `changes` job + `if:` is the working example).
+- **Required checks.** A path-filtered workflow that is a *required* status check never reports on a
+  PR it skips, and the PR sits pending forever. Only filter a caller whose checks are not required, or
+  use the job-level classifier, which reports a skipped job as success.
+
+`ne-pair-floor` and `override-lint` are not required checks in the fleet today, so their callers
+take the filter directly. The copy-paste lists are in [`templates/ne-pair-floor.yml`](templates/ne-pair-floor.yml)
+and [`templates/override-lint.yml`](templates/override-lint.yml).
+
+### Sharding JS tests (`js-ci.yml` input `shards`)
+
+`shards: N` (1-16, default 1) splits the test run into N parallel jobs named `ci (1/N)` ... `ci (N/N)`.
+Each job runs node's built-in `--test-shard=i/N`, which partitions the test files, so together the
+shards run the whole suite. With a package.json test script the flag is passed through as
+`npm test -- --test-shard=i/N`, so a custom runner (claude-bpx `scripts/run-tests.js`) has to accept
+it before its caller opts in. The default `shards: 1` runs one job named `ci` with the same commands
+as before. On Blacksmith, more jobs do not cost more, because billing is in vCPU-minutes. Shard until
+the per-job setup (checkout + install) is about 30% of a shard's wall time.
+
+```yaml
+  ci:
+    uses: ANG-Ventures/fleet-floor-workflows/.github/workflows/js-ci.yml@<sha>
+    with:
+      working-directory: bridge
+      shards: 6
+```
+
+Changing from 1 to N > 1 renames the check from `ci` to `ci (i/N)`. If `ci / ci` is a required check,
+update that requirement in the same caller PR.
+
 ### Default test CI (`test-ci.yml`, job `test`)
 
 For a repo with **no** test/build CI on pull requests (ci-speed-lint R15 lists them daily). One

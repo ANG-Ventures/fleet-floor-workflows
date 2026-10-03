@@ -30,7 +30,9 @@ class JsTimeoutContract(unittest.TestCase):
     def test_job_consumes_timeout_input(self):
         job = workflow("js-ci.yml")["jobs"]["ci"]
         self.assertEqual(job["timeout-minutes"], "${{ inputs.timeout-minutes }}")
-        self.assertEqual(job["name"], "ci")  # frozen check-run contract (D-12)
+        # Frozen check-run contract (D-12): the name evaluates to exactly `ci` at the default
+        # shards=1 (tests/test_js_ci_shards.py; proven live by selftest's `js_ci / ci` check-run).
+        self.assertTrue(job["name"].rstrip().endswith("|| 'ci' }}"), job["name"])
 
     def test_live_selftest_exercises_default_and_override(self):
         jobs = workflow("selftest.yml")["jobs"]
