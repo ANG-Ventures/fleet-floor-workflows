@@ -39,8 +39,8 @@ concurrency:
   # A reusable workflow's `github.job` is its OWN job id (always `sast`), so two callers in one run
   # still collide. The CALLER passes a unique `concurrency-suffix` (e.g. the caller job name) to keep
   # the groups distinct; default empty preserves single-caller behavior.
-  group: floor-sast-${{ github.workflow }}-${{ inputs.concurrency-suffix }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: floor-sast-${{ github.workflow }}-${{ inputs.concurrency-suffix }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   sast:
