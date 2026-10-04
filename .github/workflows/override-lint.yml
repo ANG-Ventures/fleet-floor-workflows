@@ -58,8 +58,8 @@ on:
 # `pull-requests: read`, which the caller template grants. Without it the event payload body is used.
 
 concurrency:
-  group: floor-override-lint-${{ github.workflow }}-${{ inputs.concurrency-suffix }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: floor-override-lint-${{ github.workflow }}-${{ inputs.concurrency-suffix }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   override_lint:
