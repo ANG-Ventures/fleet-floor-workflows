@@ -80,10 +80,16 @@ every file the floor can read, so a skipped run is one whose result could not ha
 filter keeps the caller workflow itself in scope, so a SHA bump or input change always re-runs the
 floor (fail-open).
 
+**The 3,000-file limit.** GitHub matches `paths:` against at most the first 3,000 files of the diff.
+When a diff has more than 3,000 files and none of the first 3,000 match, the workflow does **not** run
+(docs: "Workflow syntax", *Git diff comparisons*). A large merge whose matching files sort late is
+then skipped with no check at all. A floor whose skip would hide a finding on such a PR does not take
+`paths:`; `override-lint` is the first (Prism 7782a5f9dbf6, t_0e51de69).
+
 | Floor | Caller `paths:` | Why that set |
 |---|---|---|
 | `ne-pair-floor.yml` | `**` minus docs/data/media suffixes, with every dot-basename `**/.*` re-included | the scanner opens `.sh .bash .zsh .py .js .mjs .cjs .ts .tsx .yml .yaml .plist .service .env*` and extension-less shebang scripts across the whole tree (a dot-basename such as `.txt` has no extension to it); never `x.md`/`x.json`/`x.txt`/media. `tests/test_ne_pair_paths.py` cross-checks the filter against the scanner |
-| `override-lint.yml` | `**` minus docs/data/config suffixes and test paths, plus the caller file | it reads only ADDED lines in non-test files with a code extension (`.py .sh .bash .js .mjs .cjs .ts .tsx .go .rb .pl`) or none; a PR with none of those has no hits and passes whatever its body says |
+| `override-lint.yml` | **none** (`# path-filter-exempt:`) | the lint itself skips everything but ADDED lines in non-test files with a code extension (`.py .sh .bash .js .mjs .cjs .ts .tsx .go .rb .pl`) or none, so a docs-only PR finds no hits and passes in seconds; a caller filter would only add the 3,000-file skip |
 | `js-ci.yml` | `<working-directory>/**` and the caller file, minus `**.md` | the test run reads the package dir (package.json, lockfiles, src, tests) and nothing outside it |
 | `python-ci.yml`, `test-ci.yml` | `<working-directory>/**` and the caller file, minus docs | same reasoning as js-ci |
 | `secret-scan.yml`, `sast.yml` | **none: whole tree** | a secret or a vulnerable pattern can land in any path; `sast` also lints every workflow file |
@@ -98,9 +104,9 @@ Two constraints decide where the filter goes:
   PR it skips, and the PR sits pending forever. Only filter a caller whose checks are not required, or
   use the job-level classifier, which reports a skipped job as success.
 
-`ne-pair-floor` and `override-lint` are not required checks in the fleet today, so their callers
-take the filter directly. The copy-paste lists are in [`templates/ne-pair-floor.yml`](templates/ne-pair-floor.yml)
-and [`templates/override-lint.yml`](templates/override-lint.yml).
+`ne-pair-floor` is not a required check in the fleet today, so its caller takes the filter
+directly. The copy-paste list is in [`templates/ne-pair-floor.yml`](templates/ne-pair-floor.yml).
+[`templates/override-lint.yml`](templates/override-lint.yml) carries no filter (see the 3,000-file limit).
 
 ### Sharding JS tests (`js-ci.yml` input `shards`)
 
