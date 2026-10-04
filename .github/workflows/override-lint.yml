@@ -57,9 +57,11 @@ on:
 # ask for more than its caller gives (asking = startup_failure), and the body read over REST needs
 # `pull-requests: read`, which the caller template grants. Without it the event payload body is used.
 
-concurrency:
-  group: floor-override-lint-${{ github.workflow }}-${{ inputs.concurrency-suffix }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# No `concurrency:` block on purpose (t_69ee9353). `synchronize` and `edited` both fire for ONE head
+# (push + body edit), and a ref-keyed cancel-in-progress group cancelled the first run on the SAME sha:
+# a cancelled override_lint row beside the green one, read as red by the fleet's wake/merge readers
+# (7 false operator wakes 10-03/04). Even cancel-in-progress: false cancels a replaced PENDING run.
+# The lint is ~20 s and reads the PR body over REST, so every run completes and the newest one counts.
 
 jobs:
   override_lint:
