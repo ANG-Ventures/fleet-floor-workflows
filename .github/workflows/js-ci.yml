@@ -7,12 +7,11 @@
 # listing. NOT the package.json `test` script (content, invisible to the tree read), so the predictor
 # and this workflow can never drift. A contract test binds them on js-sample (AC-P4b-4).
 #
-# CALLER `paths:` (a reusable workflow cannot carry its own; README "Caller path filters"): the test
-# run reads everything under `working-directory`, so the filter is `<working-directory>/**` plus the
-# caller workflow file, minus docs. `paths:` is workflow-level, and the usual caller (fleet-floor.yml)
-# also hosts secret_scan/sast, which must see every path, so filter js-ci through its own caller file
-# or a job-level change classifier (ha-command-router `changes` job), never by adding `paths:` to a
-# fleet-floor.yml that still holds secret_scan.
+# CALLER `paths:` (a reusable workflow cannot carry its own; README "Caller path filters"): the
+# pull_request trigger takes NO filter. GitHub skips a filtered workflow when the diff has more than
+# 3,000 files and none of the first 3,000 match, and a skipped PR test gate reports nothing
+# (t_5df3de69). push:main may take `paths-ignore` for docs. To skip a run, gate the job with a
+# job-level change classifier (ha-command-router `changes` job) that fails open, never with `paths:`.
 #
 # SHARDING: `shards: N` (default 1) fans the test run out into N matrix jobs `ci (i/N)`, each running
 # `node --test --test-shard=i/N` (or `npm test -- --test-shard=i/N` when package.json has a test

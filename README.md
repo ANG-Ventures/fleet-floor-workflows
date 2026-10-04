@@ -73,40 +73,39 @@ JS/TS CI (`js-ci.yml`) takes the same numeric `timeout-minutes` input with the s
 
 ### Caller path filters (`paths:`)
 
-A reusable workflow cannot carry `paths:`; the **caller** decides when it fires. A caller with no
-filter runs its floor on every commit (card t_a1dd1955: >= 6 repos fired every floor job on every
-PR and push). Set the filter below in the caller, on `pull_request` and on `push`. Each filter covers
-every file the floor can read, so a skipped run is one whose result could not have changed. Every
-filter keeps the caller workflow itself in scope, so a SHA bump or input change always re-runs the
-floor (fail-open).
+A reusable workflow cannot carry `paths:`; the **caller** decides when it fires (card t_a1dd1955:
+>= 6 repos fired every floor job on every PR and push). The rule, per trigger:
 
-**The 3,000-file limit.** GitHub matches `paths:` against at most the first 3,000 files of the diff.
-When a diff has more than 3,000 files and none of the first 3,000 match, the workflow does **not** run
-(docs: "Workflow syntax", *Git diff comparisons*). A large merge whose matching files sort late is
-then skipped with no check at all. A floor whose skip would hide a finding on such a PR does not take
-`paths:`; `override-lint` is the first (Prism 7782a5f9dbf6, t_0e51de69).
+- **`pull_request`: no `paths:` / `paths-ignore:` on any floor caller.** Mark the caller
+  `# path-filter-exempt: <why>` so fleet R14 (`sast.yml`) passes it.
+- **`push: main`**: `paths-ignore` for docs (`'**.md'`, `'docs/**'`) is allowed on a test floor. The PR
+  run already gated the change, so push is only a backstop. `ne-pair-floor` takes none.
 
-| Floor | Caller `paths:` | Why that set |
+**The 3,000-file limit.** GitHub matches a path filter against at most the first 3,000 files of the
+diff. When a diff has more than 3,000 files and none of the first 3,000 match, the workflow does **not**
+run (docs: "Workflow syntax", *Git diff comparisons*). A large merge (an upstream parity merge) whose
+matching files sort late is then skipped with no check at all, so a filter can hide a finding exactly
+where the most code changes (Prism 7782a5f9dbf6, t_0e51de69, t_5df3de69).
+
+| Floor | Caller filter | Why |
 |---|---|---|
-| `ne-pair-floor.yml` | `**` minus docs/data/media suffixes, with every dot-basename `**/.*` re-included | the scanner opens `.sh .bash .zsh .py .js .mjs .cjs .ts .tsx .yml .yaml .plist .service .env*` and extension-less shebang scripts across the whole tree (a dot-basename such as `.txt` has no extension to it); never `x.md`/`x.json`/`x.txt`/media. `tests/test_ne_pair_paths.py` cross-checks the filter against the scanner |
-| `override-lint.yml` | **none** (`# path-filter-exempt:`) | the lint itself skips everything but ADDED lines in non-test files with a code extension (`.py .sh .bash .js .mjs .cjs .ts .tsx .go .rb .pl`) or none, so a docs-only PR finds no hits and passes in seconds; a caller filter would only add the 3,000-file skip |
-| `js-ci.yml` | `<working-directory>/**` and the caller file, minus `**.md` | the test run reads the package dir (package.json, lockfiles, src, tests) and nothing outside it |
-| `python-ci.yml`, `test-ci.yml` | `<working-directory>/**` and the caller file, minus docs | same reasoning as js-ci |
+| `ne-pair-floor.yml` | **none**, either event | security lint; the scanner opens only `.sh .bash .zsh .py .js .mjs .cjs .ts .tsx .yml .yaml .plist .service .env*` and extension-less shebang scripts itself, and a full-tree run takes ~25 s on hermes-home |
+| `override-lint.yml` | **none** | the lint itself skips everything but ADDED lines in non-test files with a code extension (`.py .sh .bash .js .mjs .cjs .ts .tsx .go .rb .pl`) or none, so a docs-only PR finds no hits and passes in seconds |
+| `js-ci.yml`, `python-ci.yml`, `test-ci.yml` | PR: **none**. push:main: `paths-ignore` docs | a skipped PR test gate reports nothing; a `<working-directory>/**` filter skips a big PR whose package files sort late |
 | `secret-scan.yml`, `sast.yml` | **none: whole tree** | a secret or a vulnerable pattern can land in any path; `sast` also lints every workflow file |
 
-Two constraints decide where the filter goes:
+To skip a costly test floor on a PR that cannot affect it, gate the **job**, not the trigger: a
+`changes` job lists the PR's files over REST (`pulls/{n}/files`, paginated; GitHub returns at most
+3,000) and sets the output to run when any file matches, when the list holds 3,000 files, or when the
+call fails (fail open). ha-command-router's `changes` job + `if:` is the working example. Two constraints:
 
 - `paths:` is **workflow-level**. `fleet-floor.yml` usually hosts `secret_scan` and `sast` next to
-  `ci`, and those need the whole tree. Do not add `paths:` to a `fleet-floor.yml` that still holds
-  them. Either move the test component into its own caller file with the filter, or gate it with a
-  job-level change classifier (ha-command-router's `changes` job + `if:` is the working example).
+  `ci`, and those need the whole tree.
 - **Required checks.** A path-filtered workflow that is a *required* status check never reports on a
-  PR it skips, and the PR sits pending forever. Only filter a caller whose checks are not required, or
-  use the job-level classifier, which reports a skipped job as success.
+  PR it skips, and the PR sits pending forever. A skipped job reports success, but a skipped
+  reusable-workflow call reports under the caller job's name only, so check the required context names.
 
-`ne-pair-floor` is not a required check in the fleet today, so its caller takes the filter
-directly. The copy-paste list is in [`templates/ne-pair-floor.yml`](templates/ne-pair-floor.yml).
-[`templates/override-lint.yml`](templates/override-lint.yml) carries no filter (see the 3,000-file limit).
+`tests/test_caller_paths.py` holds every template to this table.
 
 ### Sharding JS tests (`js-ci.yml` input `shards`)
 

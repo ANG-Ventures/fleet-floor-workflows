@@ -11,10 +11,9 @@
 # Opt-outs: `.ne-pair-floor-allow` at the scanned root (`<path-glob> <check|*> <reason>`), or the `allowlist` input.
 # The scanner is scripts/ne_pair_floor.py, embedded below byte-for-byte (tests/test_ne_pair_floor.py enforces it)
 # so the caller's SHA pin pins the scanner too. Internal job name `ne_pair_floor` is a frozen contract.
-# CALLER `paths:` (a reusable workflow cannot carry its own; README "Caller path filters"): the scan is
-# full-tree but opens only SUFFIXES files, `.env*`, and extension-less shebang scripts, so the caller's
-# filter is `**` minus docs/data/media suffixes with dot-basenames `**/.*` re-included (templates/ne-pair-floor.yml).
-# A commit touching none of those cannot change the result.
+# CALLER `paths:`: none (README "Caller path filters", the 3,000-file limit). The scan opens only SUFFIXES
+# files, `.env*`, and extension-less shebang scripts itself, so an unfiltered run on a docs-only commit is
+# cheap; a caller filter would skip a >3,000-file diff whose scanned files sort late (t_5df3de69).
 name: floor-ne-pair
 
 on:

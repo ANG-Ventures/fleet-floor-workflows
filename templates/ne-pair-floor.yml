@@ -12,61 +12,14 @@
 #                   Public or Kyzcreig repo: ubuntu-latest.
 name: ne-pair-floor
 
-# paths: every file type the scanner opens (README "Caller path filters"). A commit that touches only
-# files the scanner never reads cannot change its full-tree result. This caller is a .yml, so it stays
-# in scope: a floor SHA bump always re-runs the scan.
+# path-filter-exempt: no `paths:` on purpose (t_5df3de69, same class as Prism 7782a5f9dbf6). GitHub drops a
+# filtered workflow when the diff has more than 3,000 files and none of the first 3,000 match, so a big
+# merge whose scanned files sort late would skip this security lint with no check at all. The scanner
+# filters by suffix itself and a full-tree run takes ~25 s on the largest fleet repo. Not a required check.
 on:
   pull_request:
-    paths:
-      - '**'
-      # Never opened by the scanner (not in SUFFIXES, no shebang): docs, data, captures, media.
-      - '!**.md'
-      - '!**.json'
-      - '!**.jsonl'
-      - '!**.txt'
-      - '!**.log'
-      - '!**.csv'
-      - '!**.sse'
-      - '!**.patch'
-      - '!**.diff'
-      - '!**.html'
-      - '!**.svg'
-      - '!**.png'
-      - '!**.jpg'
-      - '!**.jpeg'
-      - '!**.gif'
-      - '!**.webp'
-      - '!**.pdf'
-      # Every dot-basename is re-included after the negations: `.env*` is scanned whatever its suffix
-      # (`.env.json`), and a file named exactly `.txt`/`.md`/... has no extension to the scanner
-      # (splitext(".txt")[1] == ""), so it is opened when it carries a shebang (t_62fba842).
-      - '**/.*'
   push:
     branches: [main]
-    paths:
-      - '**'
-      # Never opened by the scanner (not in SUFFIXES, no shebang): docs, data, captures, media.
-      - '!**.md'
-      - '!**.json'
-      - '!**.jsonl'
-      - '!**.txt'
-      - '!**.log'
-      - '!**.csv'
-      - '!**.sse'
-      - '!**.patch'
-      - '!**.diff'
-      - '!**.html'
-      - '!**.svg'
-      - '!**.png'
-      - '!**.jpg'
-      - '!**.jpeg'
-      - '!**.gif'
-      - '!**.webp'
-      - '!**.pdf'
-      # Every dot-basename is re-included after the negations: `.env*` is scanned whatever its suffix
-      # (`.env.json`), and a file named exactly `.txt`/`.md`/... has no extension to the scanner
-      # (splitext(".txt")[1] == ""), so it is opened when it carries a shebang (t_62fba842).
-      - '**/.*'
 
 permissions:
   contents: read
