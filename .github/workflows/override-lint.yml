@@ -28,7 +28,7 @@ on:
   workflow_call:
     inputs:
       runner:
-        description: "Runner label. Private ANG-Ventures repos pass blacksmith-2vcpu-ubuntu-2404 (x64 only)."
+        description: "Runner label. Private ANG-Ventures repos pass hermes-ci via vars.CI_RUNNER (no Blacksmith label: moratorium) (x64 only)."
         type: string
         default: "ubuntu-latest"
       scope:
