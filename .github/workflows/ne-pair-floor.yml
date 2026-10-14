@@ -20,7 +20,7 @@ on:
   workflow_call:
     inputs:
       runner:
-        description: "Runner label. Private ANG-Ventures repos pass blacksmith-2vcpu-ubuntu-2404."
+        description: "Runner label. Private ANG-Ventures repos pass hermes-ci via vars.CI_RUNNER (no Blacksmith label: moratorium)"
         type: string
         default: "ubuntu-latest"
       path:
