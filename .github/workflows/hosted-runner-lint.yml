@@ -6,8 +6,9 @@
 # Rule: a workflow code line naming `ubuntu-*` / `windows-*` / `macos-*` (literal runs-on, matrix value,
 # `with: runner:`, an input default, the fallback of `vars.X || '...'`) is a FINDING with path:line, unless the
 # line or its job carries `# hosted-ok: <why>`. A PUBLIC caller (`github.event.repository.private == false`)
-# is skipped. The scanner is scripts/hosted_runner_lint.py, embedded below byte-for-byte
-# (tests/test_hosted_runner_lint.py enforces it), so the caller's SHA pin pins the scanner too.
+# is skipped. The scanner is scripts/hosted_runner_lint.py, embedded below BASE64 (its fixtures carry literal
+# GitHub expression text, which GitHub would parse inside run:); tests/test_hosted_runner_lint.py pins decode == source, so the
+# caller's SHA pin pins the scanner too. Regenerate: base64 -w100 scripts/hosted_runner_lint.py.
 # Internal job name `hosted_runner_lint` is a frozen contract.
 # CALLER `paths:`: none (README "Caller path filters"); the lint reads only .github/workflows and takes ~1 s.
 name: floor-hosted-runner-lint
@@ -43,316 +44,232 @@ jobs:
           HOSTED_RUNNER_LINT_REPO_PRIVATE: ${{ github.event.repository.private }}
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/hosted_runner_lint.py" <<'PY'
-          #!/usr/bin/env python3
-          # fleet-floor copy of ANG-Ventures/hermes-home scripts/lints/hosted-runner-lint.py (card t_a8dc95de);
-          # embedded byte-for-byte in .github/workflows/hosted-runner-lint.yml (tests/test_hosted_runner_lint.py).
-          # Only change vs the hermes-home copy: --root defaults to the current directory (the caller checkout).
-          """hosted-runner-lint -- no workflow job may resolve to a GitHub-hosted (metered) runner label (t_a8dc95de).
-
-          WHY. 2026-10-16 05:0x, orgs/ANG-Ventures/settings/billing/usage: Oct 1-16 Actions GROSS $2,730.90, net $296.36
-          (Sep gross $2,485, net $155.75). The net stayed small, so nobody looked. 39 hermes-home workflows ran
-          `vars.CI_LIGHT_RUNNER || 'ubuntu-latest'` with the variable unset (hosted since day one) and hermes-agent
-          carried ~70 hosted literals. Ace ruling 2026-10-16 04:25: NO metered GitHub-hosted minutes; everything runs
-          on the local runners.
-
-          RULE. In every .github/workflows/*.yml|*.yaml file, a CODE line (comments stripped, `run:` / `script:` block
-          scalars and `name:` / `description:` values skipped) that names a GitHub-hosted label is a FINDING:
-            ubuntu-latest, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-latest-8-cores, windows-latest, windows-2022,
-            windows-11-arm, macos-latest, macos-15, macos-15-intel, ... (`(ubuntu|windows|macos)-(latest|<digit>...)`)
-          That covers a literal `runs-on:`, a matrix value (`os: [ubuntu-latest, windows-latest]`), the fallback of
-          `${{ vars.X || 'ubuntu-latest' }}` / `fromJSON(vars.X || '["ubuntu-latest"]')` (an unset variable = billed),
-          a reusable caller's `with: runner: ubuntu-latest`, and a reusable workflow's `inputs.<x>.default`.
-          A Blacksmith label (`blacksmith-4vcpu-ubuntu-2404`) never matches (its `ubuntu-` follows a `-`).
-
-          WAIVER. `# hosted-ok: <why>` (non-empty reason) on the finding's own line, or anywhere in the enclosing JOB
-          (from its `  <job_id>:` key to the next job key), e.g. a Windows/macOS build matrix with no self-hosted
-          runner. A line outside any job (an `on.workflow_call.inputs` default) takes the waiver on its own line or
-          the line directly above. An empty reason is itself a finding.
-
-          SCOPE. PRIVATE repos only (Apollo/Ace 2026-10-16 05:5x: "we take advantage of free stuff obviously but not
-          billed stuff"; a PUBLIC repo's hosted minutes are $0, e.g. hermes-agent Oct gross $2,412 / net $0).
-          `--repo-private false` (or env HOSTED_RUNNER_LINT_REPO_PRIVATE=false; in a workflow pass
-          `${{ github.event.repository.private }}`) prints `skipped: public repo` and exits 0. Unset or any other
-          value = private (fail closed: an unknown visibility is graded as billed).
-
-          OUTPUT. One `FINDING <path>:<line>: <label> in job <job>: <the line>` per hit; exit 1 with findings, 0 clean
-          (silent unless --verbose), 2 when no workflow file was read (blind is never clean).
-
-            hosted-runner-lint.py [--root DIR] [--verbose]   lint DIR/.github/workflows (default: repo root)
-            hosted-runner-lint.py --self-test                fixture mutants; rc 0 only if every one is classified right
-
-          Stdlib only, single file: fleet-floor-workflows embeds this file byte-for-byte in its reusable
-          hosted-runner-lint.yml (its tests/test_hosted_runner_lint.py enforces the copy).
-          """
-          from __future__ import annotations
-
-          import argparse
-          import os
-          import re
-          import sys
-          import tempfile
-          from pathlib import Path
-
-          LABEL = re.compile(r"(?<![\w.-])((?:ubuntu|windows|macos)-(?:latest|slim|\d[\w.]*)(?:-[\w.]+)*)(?![\w.-])", re.I)
-          WAIVER = re.compile(r"#\s*hosted-ok\s*:(.*)$")
-          KEY = re.compile(r"^(\s*)(-\s+)?([\w.-]+|\"[^\"]*\"|'[^']*')\s*:(?:\s|$)")
-          BLOCK_SCALAR = re.compile(r":\s*[|>][+-]?\d*\s*(#.*)?$")
-          PROSE_KEYS = {"name", "description", "run-name"}
-          SCRIPT_KEYS = {"run", "script", "shell-script"}
-
-
-          def strip_comment(line: str) -> tuple[str, str]:
-              """(code, comment). A `#` starts a comment at line start or after whitespace, outside quotes."""
-              quote = None
-              for i, ch in enumerate(line):
-                  if quote:
-                      if ch == quote:
-                          quote = None
-                  elif ch in ("'", '"'):
-                      quote = ch
-                  elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
-                      return line[:i], line[i:]
-              return line, ""
-
-
-          def waiver_of(comment: str) -> str | None:
-              """None: no waiver on this comment. '': waiver with an empty reason. Else the reason."""
-              m = WAIVER.search(comment)
-              return None if not m else m.group(1).strip()
-
-
-          def lint_text(text: str, rel: str) -> list[str]:
-              lines = text.splitlines()
-              # Pass 1: job spans. `jobs:` at column 0; a job key is the first deeper indent below it.
-              jobs: list[tuple[int, int, str]] = []          # (start_idx, end_idx_exclusive, job_id)
-              in_jobs, job_indent = False, None
-              cur = None
-              for i, raw in enumerate(lines):
-                  code, _ = strip_comment(raw)
-                  if not code.strip():
-                      continue
-                  indent = len(code) - len(code.lstrip())
-                  if indent == 0:
-                      if cur:
-                          jobs.append((cur[0], i, cur[1]))
-                          cur = None
-                      in_jobs = code.strip().startswith("jobs:")
-                      job_indent = None
-                      continue
-                  if not in_jobs:
-                      continue
-                  m = KEY.match(code)
-                  if job_indent is None and m:
-                      job_indent = indent
-                  if m and indent == job_indent:
-                      if cur:
-                          jobs.append((cur[0], i, cur[1]))
-                      cur = (i, m.group(3).strip("'\""))
-              if cur:
-                  jobs.append((cur[0], len(lines), cur[1]))
-
-              def job_at(i: int):
-                  for s, e, j in jobs:
-                      if s <= i < e:
-                          return s, e, j
-                  return None
-
-              # Pass 2: skip mask. Lines that are a script/prose value (a `run:`/`name:` key and its block-scalar
-              # body) are never a runner and never carry a waiver (Prism 56c3ec3f0c88: a heredoc line
-              # `# hosted-ok: x` must not waive the job). Inside a `matrix:` mapping every key is data, so a
-              # dimension called `name` is still graded (Prism e8a94753e3db).
-              skip = [False] * len(lines)
-              block_indent = None                             # inside a run:/name: block scalar deeper than this
-              matrix_indent = None                            # inside a `matrix:` mapping deeper than this
-              for i, raw in enumerate(lines):
-                  indent = len(raw) - len(raw.lstrip())
-                  if block_indent is not None:
-                      if raw.strip() == "" or indent > block_indent:
-                          skip[i] = True
-                          continue
-                      block_indent = None
-                  code, _ = strip_comment(raw)
-                  if not code.strip():
-                      continue
-                  if matrix_indent is not None and indent <= matrix_indent:
-                      matrix_indent = None
-                  m = KEY.match(code)
-                  key = m.group(3).strip("'\"") if m else None
-                  if key == "matrix" and matrix_indent is None:
-                      matrix_indent = len(m.group(1)) + (len(m.group(2)) if m.group(2) else 0)
-                      continue
-                  if matrix_indent is None and key in SCRIPT_KEYS | PROSE_KEYS:
-                      skip[i] = True
-                      if BLOCK_SCALAR.search(raw.rstrip()) or code.rstrip().endswith(":"):
-                          block_indent = len(m.group(1)) + (len(m.group(2)) if m.group(2) else 0)
-
-              job_waiver: dict[str, str | None] = {}
-              for s, e, j in jobs:
-                  w = None
-                  for k in range(s, e):
-                      if skip[k]:
-                          continue
-                      r = waiver_of(strip_comment(lines[k])[1])
-                      if r is not None:
-                          w = r if w is None or (r and not w) else w
-                  job_waiver[j] = w
-
-              findings: list[str] = []
-              for i, raw in enumerate(lines):
-                  code, comment = strip_comment(raw)
-                  if skip[i] or not code.strip():
-                      continue
-                  for lm in LABEL.finditer(code):
-                      label = lm.group(1)
-                      if label.lower().startswith("ubuntu-") and code[max(0, lm.start() - 1)] == "/":
-                          continue                             # e.g. an image path `.../ubuntu-24.04`, not a label
-                      line_w = waiver_of(comment)
-                      span = job_at(i)
-                      if span:
-                          w = line_w if line_w is not None else job_waiver.get(span[2])
-                          where = "job " + span[2]
-                      else:
-                          prev = waiver_of(strip_comment(lines[i - 1])[1]) if i > 0 and not skip[i - 1] else None
-                          w = line_w if line_w is not None else prev
-                          where = "workflow scope"
-                      if w:
-                          continue
-                      why = " (`# hosted-ok:` has an empty reason)" if w == "" else ""
-                      findings.append("FINDING {}:{}: {} in {}{}: {}".format(rel, i + 1, label, where, why, raw.strip()))
-                      break                                    # one finding per line
-              return findings
-
-
-          def lint_root(root: Path) -> tuple[int, list[str]]:
-              wf = root / ".github" / "workflows"
-              files = sorted(p for p in wf.glob("*") if p.suffix in (".yml", ".yaml") and p.is_file()) if wf.is_dir() else []
-              out: list[str] = []
-              for p in files:
-                  try:
-                      text = p.read_text(encoding="utf-8")
-                  except (OSError, UnicodeDecodeError) as exc:
-                      out.append("FINDING {}: unreadable ({})".format(p.relative_to(root), exc))
-                      continue
-                  out.extend(lint_text(text, str(p.relative_to(root))))
-              return len(files), out
-
-
-          HEAD = "name: t\non: [push]\njobs:\n"
-          CASES = [
-              # (label, workflow text, expected finding count)
-              ("literal ubuntu-latest", HEAD + "  a:\n    runs-on: ubuntu-latest\n    steps: [{run: 'true'}]\n", 1),
-              ("literal ubuntu-24.04", HEAD + "  a:\n    runs-on: ubuntu-24.04\n", 1),
-              ("vars fallback", HEAD + "  a:\n    runs-on: ${{ vars.CI_LIGHT_RUNNER || 'ubuntu-latest' }}\n", 1),
-              ("fromJSON fallback", HEAD + "  a:\n    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '[\"ubuntu-latest\"]') }}\n", 1),
-              ("self-hosted fromJSON fallback", HEAD + "  a:\n    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '[\"self-hosted\",\"hermes-ci\"]') }}\n", 0),
-              ("pool label", HEAD + "  a:\n    runs-on: ${{ vars.CI_LIGHT_RUNNER || 'hermes-ci' }}\n", 0),
-              ("blacksmith label", HEAD + "  a:\n    runs-on: blacksmith-4vcpu-ubuntu-2404\n", 0),
-              ("matrix flow list", HEAD + "  a:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n"
-               "    runs-on: ${{ matrix.os }}\n", 1),
-              ("matrix block list", HEAD + "  a:\n    strategy:\n      matrix:\n        os:\n          - macos-15\n          - windows-2022\n"
-               "    runs-on: ${{ matrix.os }}\n", 2),
-              ("matrix include runner", HEAD + "  a:\n    strategy:\n      matrix:\n        include:\n          - runner: windows-11-arm\n", 1),
-              ("reusable with runner", HEAD + "  a:\n    uses: o/r/.github/workflows/x.yml@abc\n    with:\n      runner: ubuntu-latest\n", 1),
-              ("reusable input default", "on:\n  workflow_call:\n    inputs:\n      runner:\n        type: string\n"
-               "        default: \"ubuntu-latest\"\njobs:\n  a:\n    runs-on: ${{ inputs.runner }}\n", 1),
-              ("input default waived above", "on:\n  workflow_call:\n    inputs:\n      runner:\n        # hosted-ok: public caller\n"
-               "        default: \"ubuntu-latest\"\njobs:\n  a:\n    runs-on: ${{ inputs.runner }}\n", 0),
-              ("ternary macos", HEAD + "  a:\n    runs-on: ${{ inputs.arch == 'x64' && 'macos-15-intel' || 'macos-15' }}\n", 1),
-              ("line waiver", HEAD + "  a:\n    runs-on: windows-latest  # hosted-ok: no self-hosted Windows runner (Ace)\n", 0),
-              ("job waiver covers matrix", HEAD + "  win:\n    # hosted-ok: Windows build matrix, no self-hosted runner\n    strategy:\n"
-               "      matrix:\n        os: [windows-latest, windows-2022]\n    runs-on: ${{ matrix.os }}\n", 0),
-              ("job waiver does not leak", HEAD + "  win:\n    # hosted-ok: Windows build\n    runs-on: windows-latest\n"
-               "  lin:\n    runs-on: ubuntu-latest\n", 1),
-              ("empty waiver", HEAD + "  a:\n    runs-on: ubuntu-latest  # hosted-ok:\n", 1),
-              ("other waiver word", HEAD + "  a:\n    runs-on: ubuntu-latest  # github-hosted: free\n", 1),
-              ("comment only", HEAD + "  a:\n    # was ubuntu-latest until 10-16\n    runs-on: hermes-ci  # not ubuntu-24.04 any more\n", 0),
-              ("run block mentions label", HEAD + "  a:\n    runs-on: hermes-ci\n    steps:\n      - run: |\n"
-               "          echo ubuntu-latest\n          docker pull ubuntu-24.04\n      - run: echo windows-latest\n", 0),
-              ("name/description prose", HEAD + "  a:\n    name: runs like ubuntu-latest\n    runs-on: hermes-ci\n", 0),
-              ("after run block resumes", HEAD + "  a:\n    runs-on: hermes-ci\n    steps:\n      - run: |\n          echo hi\n"
-               "  b:\n    runs-on: ubuntu-latest\n", 1),
-              ("label in quotes with hash", HEAD + "  a:\n    runs-on: ${{ vars.X || 'ubuntu-latest' }} # c#d\n", 1),
-              ("arm label", HEAD + "  a:\n    runs-on: ubuntu-24.04-arm\n", 1),
-              ("ubuntu-slim (Prism 4f0b5bb8672b)", HEAD + "  a:\n    runs-on: ubuntu-slim\n", 1),
-              ("heredoc waiver ignored (Prism 56c3ec3f0c88)", HEAD + "  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n"
-               "          cat > f.yml <<EOF\n          # hosted-ok: fixture\n          EOF\n", 1),
-              ("matrix dim named name (Prism e8a94753e3db)", HEAD + "  a:\n    strategy:\n      matrix:\n        name: [ubuntu-latest]\n"
-               "    runs-on: ${{ matrix.name }}\n", 1),
-              ("matrix block dim named description", HEAD + "  a:\n    strategy:\n      matrix:\n        description:\n"
-               "          - windows-latest\n    runs-on: ${{ matrix.description }}\n", 1),
-              ("name after matrix still prose", HEAD + "  a:\n    strategy:\n      matrix:\n        os: [x]\n"
-               "    name: like ubuntu-latest\n    runs-on: hermes-ci\n", 0),
-              ("image path not label", HEAD + "  a:\n    runs-on: hermes-ci\n    container: ghcr.io/x/ubuntu-24.04\n", 0),
-          ]
-
-
-          def is_public(flag: str) -> bool:
-              """Only an explicit 'false' (GitHub's `repository.private` rendering) means public. Fail closed."""
-              return str(flag).strip().lower() == "false"
-
-
-          def self_test() -> int:
-              bad = 0
-              for flag, want in (("false", True), ("False", True), ("true", False), ("", False), ("garbage", False)):
-                  ok = is_public(flag) == want
-                  bad += not ok
-                  print("{} {:32s} want public={} got {}".format("ok  " if ok else "FAIL", "repo-private=%r" % flag, want,
-                                                                 is_public(flag)))
-              for label, text, want in CASES:
-                  got = lint_text(text, "wf.yml")
-                  ok = len(got) == want
-                  bad += not ok
-                  print("{} {:32s} want {} got {}{}".format("ok  " if ok else "FAIL", label, want, len(got),
-                                                           "" if ok else "  " + " | ".join(got)))
-              with tempfile.TemporaryDirectory() as d:
-                  n, f = lint_root(Path(d))
-                  ok = n == 0
-                  bad += not ok
-                  print("{} {:32s} want 0 files read got {}".format("ok  " if ok else "FAIL", "blind (no workflows dir)", n))
-                  os.makedirs(os.path.join(d, ".github", "workflows"))
-                  Path(d, ".github", "workflows", "a.yml").write_text(CASES[0][1])
-                  Path(d, ".github", "workflows", "b.yaml").write_text(CASES[5][1])
-                  n, f = lint_root(Path(d))
-                  ok = n == 2 and len(f) == 1 and "a.yml:5" in f[0]
-                  bad += not ok
-                  print("{} {:32s} want 2 files/1 finding at a.yml:5 got {}/{}".format("ok  " if ok else "FAIL", "root walk", n, f))
-              print("self-test: {}".format("PASS" if not bad else "FAIL ({} case(s))".format(bad)))
-              return 0 if not bad else 1
-
-
-          def main(argv=None) -> int:
-              ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
-              ap.add_argument("--root", default=None, help="repo root (default: this script's repo)")
-              ap.add_argument("--self-test", action="store_true")
-              ap.add_argument("--verbose", action="store_true")
-              ap.add_argument("--repo-private", default=os.environ.get("HOSTED_RUNNER_LINT_REPO_PRIVATE", ""),
-                              help="'false' = public repo (hosted minutes free): skip. Anything else = private (default).")
-              a = ap.parse_args(argv)
-              if a.self_test:
-                  return self_test()
-              if is_public(a.repo_private):
-                  print("hosted-runner-lint: skipped: public repo (GitHub-hosted minutes are $0 there)")
-                  return 0
-              root = Path(a.root) if a.root else Path.cwd()
-              n, findings = lint_root(root)
-              if n == 0:
-                  print("hosted-runner-lint: BLIND: no workflow files under {}/.github/workflows".format(root), file=sys.stderr)
-                  return 2
-              for f in findings:
-                  print(f)
-              if findings:
-                  print("hosted-runner-lint: {} finding(s) in {} workflow file(s). Fix: runs-on the local pool "
-                        "(`${{{{ vars.CI_LIGHT_RUNNER || 'hermes-ci' }}}}`, or `fromJSON(vars.CI_RUNNER_LABELS || "
-                        "'[\"self-hosted\",\"hermes-ci\"]')`); a job that truly needs GitHub-hosted carries "
-                        "`# hosted-ok: <why>`.".format(len(findings), n))
-                  return 1
-              if a.verbose:
-                  print("hosted-runner-lint: clean ({} workflow file(s))".format(n))
-              return 0
-
-
-          if __name__ == "__main__":
-              sys.exit(main())
-          PY
+          base64 -d > "$RUNNER_TEMP/hosted_runner_lint.py" <<'B64'
+          IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwojIGZsZWV0LWZsb29yIGNvcHkgb2YgQU5HLVZlbnR1cmVzL2hlcm1lcy1ob21lIHNjcmlw
+          dHMvbGludHMvaG9zdGVkLXJ1bm5lci1saW50LnB5IChjYXJkIHRfYThkYzk1ZGUpOwojIGVtYmVkZGVkIGJ5dGUtZm9yLWJ5dGUg
+          aW4gLmdpdGh1Yi93b3JrZmxvd3MvaG9zdGVkLXJ1bm5lci1saW50LnltbCAodGVzdHMvdGVzdF9ob3N0ZWRfcnVubmVyX2xpbnQu
+          cHkpLgojIE9ubHkgY2hhbmdlIHZzIHRoZSBoZXJtZXMtaG9tZSBjb3B5OiAtLXJvb3QgZGVmYXVsdHMgdG8gdGhlIGN1cnJlbnQg
+          ZGlyZWN0b3J5ICh0aGUgY2FsbGVyIGNoZWNrb3V0KS4KIiIiaG9zdGVkLXJ1bm5lci1saW50IC0tIG5vIHdvcmtmbG93IGpvYiBt
+          YXkgcmVzb2x2ZSB0byBhIEdpdEh1Yi1ob3N0ZWQgKG1ldGVyZWQpIHJ1bm5lciBsYWJlbCAodF9hOGRjOTVkZSkuCgpXSFkuIDIw
+          MjYtMTAtMTYgMDU6MHgsIG9yZ3MvQU5HLVZlbnR1cmVzL3NldHRpbmdzL2JpbGxpbmcvdXNhZ2U6IE9jdCAxLTE2IEFjdGlvbnMg
+          R1JPU1MgJDIsNzMwLjkwLCBuZXQgJDI5Ni4zNgooU2VwIGdyb3NzICQyLDQ4NSwgbmV0ICQxNTUuNzUpLiBUaGUgbmV0IHN0YXll
+          ZCBzbWFsbCwgc28gbm9ib2R5IGxvb2tlZC4gMzkgaGVybWVzLWhvbWUgd29ya2Zsb3dzIHJhbgpgdmFycy5DSV9MSUdIVF9SVU5O
+          RVIgfHwgJ3VidW50dS1sYXRlc3QnYCB3aXRoIHRoZSB2YXJpYWJsZSB1bnNldCAoaG9zdGVkIHNpbmNlIGRheSBvbmUpIGFuZCBo
+          ZXJtZXMtYWdlbnQKY2FycmllZCB+NzAgaG9zdGVkIGxpdGVyYWxzLiBBY2UgcnVsaW5nIDIwMjYtMTAtMTYgMDQ6MjU6IE5PIG1l
+          dGVyZWQgR2l0SHViLWhvc3RlZCBtaW51dGVzOyBldmVyeXRoaW5nIHJ1bnMKb24gdGhlIGxvY2FsIHJ1bm5lcnMuCgpSVUxFLiBJ
+          biBldmVyeSAuZ2l0aHViL3dvcmtmbG93cy8qLnltbHwqLnlhbWwgZmlsZSwgYSBDT0RFIGxpbmUgKGNvbW1lbnRzIHN0cmlwcGVk
+          LCBgcnVuOmAgLyBgc2NyaXB0OmAgYmxvY2sKc2NhbGFycyBhbmQgYG5hbWU6YCAvIGBkZXNjcmlwdGlvbjpgIHZhbHVlcyBza2lw
+          cGVkKSB0aGF0IG5hbWVzIGEgR2l0SHViLWhvc3RlZCBsYWJlbCBpcyBhIEZJTkRJTkc6CiAgdWJ1bnR1LWxhdGVzdCwgdWJ1bnR1
+          LTI0LjA0LCB1YnVudHUtMjQuMDQtYXJtLCB1YnVudHUtbGF0ZXN0LTgtY29yZXMsIHdpbmRvd3MtbGF0ZXN0LCB3aW5kb3dzLTIw
+          MjIsCiAgd2luZG93cy0xMS1hcm0sIG1hY29zLWxhdGVzdCwgbWFjb3MtMTUsIG1hY29zLTE1LWludGVsLCAuLi4gKGAodWJ1bnR1
+          fHdpbmRvd3N8bWFjb3MpLShsYXRlc3R8PGRpZ2l0Pi4uLilgKQpUaGF0IGNvdmVycyBhIGxpdGVyYWwgYHJ1bnMtb246YCwgYSBt
+          YXRyaXggdmFsdWUgKGBvczogW3VidW50dS1sYXRlc3QsIHdpbmRvd3MtbGF0ZXN0XWApLCB0aGUgZmFsbGJhY2sgb2YKYCR7eyB2
+          YXJzLlggfHwgJ3VidW50dS1sYXRlc3QnIH19YCAvIGBmcm9tSlNPTih2YXJzLlggfHwgJ1sidWJ1bnR1LWxhdGVzdCJdJylgIChh
+          biB1bnNldCB2YXJpYWJsZSA9IGJpbGxlZCksCmEgcmV1c2FibGUgY2FsbGVyJ3MgYHdpdGg6IHJ1bm5lcjogdWJ1bnR1LWxhdGVz
+          dGAsIGFuZCBhIHJldXNhYmxlIHdvcmtmbG93J3MgYGlucHV0cy48eD4uZGVmYXVsdGAuCkEgQmxhY2tzbWl0aCBsYWJlbCAoYGJs
+          YWNrc21pdGgtNHZjcHUtdWJ1bnR1LTI0MDRgKSBuZXZlciBtYXRjaGVzIChpdHMgYHVidW50dS1gIGZvbGxvd3MgYSBgLWApLgoK
+          V0FJVkVSLiBgIyBob3N0ZWQtb2s6IDx3aHk+YCAobm9uLWVtcHR5IHJlYXNvbikgb24gdGhlIGZpbmRpbmcncyBvd24gbGluZSwg
+          b3IgYW55d2hlcmUgaW4gdGhlIGVuY2xvc2luZyBKT0IKKGZyb20gaXRzIGAgIDxqb2JfaWQ+OmAga2V5IHRvIHRoZSBuZXh0IGpv
+          YiBrZXkpLCBlLmcuIGEgV2luZG93cy9tYWNPUyBidWlsZCBtYXRyaXggd2l0aCBubyBzZWxmLWhvc3RlZApydW5uZXIuIEEgbGlu
+          ZSBvdXRzaWRlIGFueSBqb2IgKGFuIGBvbi53b3JrZmxvd19jYWxsLmlucHV0c2AgZGVmYXVsdCkgdGFrZXMgdGhlIHdhaXZlciBv
+          biBpdHMgb3duIGxpbmUgb3IKdGhlIGxpbmUgZGlyZWN0bHkgYWJvdmUuIEFuIGVtcHR5IHJlYXNvbiBpcyBpdHNlbGYgYSBmaW5k
+          aW5nLgoKU0NPUEUuIFBSSVZBVEUgcmVwb3Mgb25seSAoQXBvbGxvL0FjZSAyMDI2LTEwLTE2IDA1OjV4OiAid2UgdGFrZSBhZHZh
+          bnRhZ2Ugb2YgZnJlZSBzdHVmZiBvYnZpb3VzbHkgYnV0IG5vdApiaWxsZWQgc3R1ZmYiOyBhIFBVQkxJQyByZXBvJ3MgaG9zdGVk
+          IG1pbnV0ZXMgYXJlICQwLCBlLmcuIGhlcm1lcy1hZ2VudCBPY3QgZ3Jvc3MgJDIsNDEyIC8gbmV0ICQwKS4KYC0tcmVwby1wcml2
+          YXRlIGZhbHNlYCAob3IgZW52IEhPU1RFRF9SVU5ORVJfTElOVF9SRVBPX1BSSVZBVEU9ZmFsc2U7IGluIGEgd29ya2Zsb3cgcGFz
+          cwpgJHt7IGdpdGh1Yi5ldmVudC5yZXBvc2l0b3J5LnByaXZhdGUgfX1gKSBwcmludHMgYHNraXBwZWQ6IHB1YmxpYyByZXBvYCBh
+          bmQgZXhpdHMgMC4gVW5zZXQgb3IgYW55IG90aGVyCnZhbHVlID0gcHJpdmF0ZSAoZmFpbCBjbG9zZWQ6IGFuIHVua25vd24gdmlz
+          aWJpbGl0eSBpcyBncmFkZWQgYXMgYmlsbGVkKS4KCk9VVFBVVC4gT25lIGBGSU5ESU5HIDxwYXRoPjo8bGluZT46IDxsYWJlbD4g
+          aW4gam9iIDxqb2I+OiA8dGhlIGxpbmU+YCBwZXIgaGl0OyBleGl0IDEgd2l0aCBmaW5kaW5ncywgMCBjbGVhbgooc2lsZW50IHVu
+          bGVzcyAtLXZlcmJvc2UpLCAyIHdoZW4gbm8gd29ya2Zsb3cgZmlsZSB3YXMgcmVhZCAoYmxpbmQgaXMgbmV2ZXIgY2xlYW4pLgoK
+          ICBob3N0ZWQtcnVubmVyLWxpbnQucHkgWy0tcm9vdCBESVJdIFstLXZlcmJvc2VdICAgbGludCBESVIvLmdpdGh1Yi93b3JrZmxv
+          d3MgKGRlZmF1bHQ6IHJlcG8gcm9vdCkKICBob3N0ZWQtcnVubmVyLWxpbnQucHkgLS1zZWxmLXRlc3QgICAgICAgICAgICAgICAg
+          Zml4dHVyZSBtdXRhbnRzOyByYyAwIG9ubHkgaWYgZXZlcnkgb25lIGlzIGNsYXNzaWZpZWQgcmlnaHQKClN0ZGxpYiBvbmx5LCBz
+          aW5nbGUgZmlsZTogZmxlZXQtZmxvb3Itd29ya2Zsb3dzIGVtYmVkcyB0aGlzIGZpbGUgYnl0ZS1mb3ItYnl0ZSBpbiBpdHMgcmV1
+          c2FibGUKaG9zdGVkLXJ1bm5lci1saW50LnltbCAoaXRzIHRlc3RzL3Rlc3RfaG9zdGVkX3J1bm5lcl9saW50LnB5IGVuZm9yY2Vz
+          IHRoZSBjb3B5KS4KIiIiCmZyb20gX19mdXR1cmVfXyBpbXBvcnQgYW5ub3RhdGlvbnMKCmltcG9ydCBhcmdwYXJzZQppbXBvcnQg
+          b3MKaW1wb3J0IHJlCmltcG9ydCBzeXMKaW1wb3J0IHRlbXBmaWxlCmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKTEFCRUwgPSBy
+          ZS5jb21waWxlKHIiKD88IVtcdy4tXSkoKD86dWJ1bnR1fHdpbmRvd3N8bWFjb3MpLSg/OmxhdGVzdHxzbGltfFxkW1x3Ll0qKSg/
+          Oi1bXHcuXSspKikoPyFbXHcuLV0pIiwgcmUuSSkKV0FJVkVSID0gcmUuY29tcGlsZShyIiNccypob3N0ZWQtb2tccyo6KC4qKSQi
+          KQpLRVkgPSByZS5jb21waWxlKHIiXihccyopKC1ccyspPyhbXHcuLV0rfFwiW15cIl0qXCJ8J1teJ10qJylccyo6KD86XHN8JCki
+          KQpCTE9DS19TQ0FMQVIgPSByZS5jb21waWxlKHIiOlxzKlt8Pl1bKy1dP1xkKlxzKigjLiopPyQiKQpQUk9TRV9LRVlTID0geyJu
+          YW1lIiwgImRlc2NyaXB0aW9uIiwgInJ1bi1uYW1lIn0KU0NSSVBUX0tFWVMgPSB7InJ1biIsICJzY3JpcHQiLCAic2hlbGwtc2Ny
+          aXB0In0KCgpkZWYgc3RyaXBfY29tbWVudChsaW5lOiBzdHIpIC0+IHR1cGxlW3N0ciwgc3RyXToKICAgICIiIihjb2RlLCBjb21t
+          ZW50KS4gQSBgI2Agc3RhcnRzIGEgY29tbWVudCBhdCBsaW5lIHN0YXJ0IG9yIGFmdGVyIHdoaXRlc3BhY2UsIG91dHNpZGUgcXVv
+          dGVzLiIiIgogICAgcXVvdGUgPSBOb25lCiAgICBmb3IgaSwgY2ggaW4gZW51bWVyYXRlKGxpbmUpOgogICAgICAgIGlmIHF1b3Rl
+          OgogICAgICAgICAgICBpZiBjaCA9PSBxdW90ZToKICAgICAgICAgICAgICAgIHF1b3RlID0gTm9uZQogICAgICAgIGVsaWYgY2gg
+          aW4gKCInIiwgJyInKToKICAgICAgICAgICAgcXVvdGUgPSBjaAogICAgICAgIGVsaWYgY2ggPT0gIiMiIGFuZCAoaSA9PSAwIG9y
+          IGxpbmVbaSAtIDFdIGluICIgXHQiKToKICAgICAgICAgICAgcmV0dXJuIGxpbmVbOmldLCBsaW5lW2k6XQogICAgcmV0dXJuIGxp
+          bmUsICIiCgoKZGVmIHdhaXZlcl9vZihjb21tZW50OiBzdHIpIC0+IHN0ciB8IE5vbmU6CiAgICAiIiJOb25lOiBubyB3YWl2ZXIg
+          b24gdGhpcyBjb21tZW50LiAnJzogd2FpdmVyIHdpdGggYW4gZW1wdHkgcmVhc29uLiBFbHNlIHRoZSByZWFzb24uIiIiCiAgICBt
+          ID0gV0FJVkVSLnNlYXJjaChjb21tZW50KQogICAgcmV0dXJuIE5vbmUgaWYgbm90IG0gZWxzZSBtLmdyb3VwKDEpLnN0cmlwKCkK
+          CgpkZWYgbGludF90ZXh0KHRleHQ6IHN0ciwgcmVsOiBzdHIpIC0+IGxpc3Rbc3RyXToKICAgIGxpbmVzID0gdGV4dC5zcGxpdGxp
+          bmVzKCkKICAgICMgUGFzcyAxOiBqb2Igc3BhbnMuIGBqb2JzOmAgYXQgY29sdW1uIDA7IGEgam9iIGtleSBpcyB0aGUgZmlyc3Qg
+          ZGVlcGVyIGluZGVudCBiZWxvdyBpdC4KICAgIGpvYnM6IGxpc3RbdHVwbGVbaW50LCBpbnQsIHN0cl1dID0gW10gICAgICAgICAg
+          IyAoc3RhcnRfaWR4LCBlbmRfaWR4X2V4Y2x1c2l2ZSwgam9iX2lkKQogICAgaW5fam9icywgam9iX2luZGVudCA9IEZhbHNlLCBO
+          b25lCiAgICBjdXIgPSBOb25lCiAgICBmb3IgaSwgcmF3IGluIGVudW1lcmF0ZShsaW5lcyk6CiAgICAgICAgY29kZSwgXyA9IHN0
+          cmlwX2NvbW1lbnQocmF3KQogICAgICAgIGlmIG5vdCBjb2RlLnN0cmlwKCk6CiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAg
+          aW5kZW50ID0gbGVuKGNvZGUpIC0gbGVuKGNvZGUubHN0cmlwKCkpCiAgICAgICAgaWYgaW5kZW50ID09IDA6CiAgICAgICAgICAg
+          IGlmIGN1cjoKICAgICAgICAgICAgICAgIGpvYnMuYXBwZW5kKChjdXJbMF0sIGksIGN1clsxXSkpCiAgICAgICAgICAgICAgICBj
+          dXIgPSBOb25lCiAgICAgICAgICAgIGluX2pvYnMgPSBjb2RlLnN0cmlwKCkuc3RhcnRzd2l0aCgiam9iczoiKQogICAgICAgICAg
+          ICBqb2JfaW5kZW50ID0gTm9uZQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGlmIG5vdCBpbl9qb2JzOgogICAgICAgICAg
+          ICBjb250aW51ZQogICAgICAgIG0gPSBLRVkubWF0Y2goY29kZSkKICAgICAgICBpZiBqb2JfaW5kZW50IGlzIE5vbmUgYW5kIG06
+          CiAgICAgICAgICAgIGpvYl9pbmRlbnQgPSBpbmRlbnQKICAgICAgICBpZiBtIGFuZCBpbmRlbnQgPT0gam9iX2luZGVudDoKICAg
+          ICAgICAgICAgaWYgY3VyOgogICAgICAgICAgICAgICAgam9icy5hcHBlbmQoKGN1clswXSwgaSwgY3VyWzFdKSkKICAgICAgICAg
+          ICAgY3VyID0gKGksIG0uZ3JvdXAoMykuc3RyaXAoIidcIiIpKQogICAgaWYgY3VyOgogICAgICAgIGpvYnMuYXBwZW5kKChjdXJb
+          MF0sIGxlbihsaW5lcyksIGN1clsxXSkpCgogICAgZGVmIGpvYl9hdChpOiBpbnQpOgogICAgICAgIGZvciBzLCBlLCBqIGluIGpv
+          YnM6CiAgICAgICAgICAgIGlmIHMgPD0gaSA8IGU6CiAgICAgICAgICAgICAgICByZXR1cm4gcywgZSwgagogICAgICAgIHJldHVy
+          biBOb25lCgogICAgIyBQYXNzIDI6IHNraXAgbWFzay4gTGluZXMgdGhhdCBhcmUgYSBzY3JpcHQvcHJvc2UgdmFsdWUgKGEgYHJ1
+          bjpgL2BuYW1lOmAga2V5IGFuZCBpdHMgYmxvY2stc2NhbGFyCiAgICAjIGJvZHkpIGFyZSBuZXZlciBhIHJ1bm5lciBhbmQgbmV2
+          ZXIgY2FycnkgYSB3YWl2ZXIgKFByaXNtIDU2YzNlYzNmMGM4ODogYSBoZXJlZG9jIGxpbmUKICAgICMgYCMgaG9zdGVkLW9rOiB4
+          YCBtdXN0IG5vdCB3YWl2ZSB0aGUgam9iKS4gSW5zaWRlIGEgYG1hdHJpeDpgIG1hcHBpbmcgZXZlcnkga2V5IGlzIGRhdGEsIHNv
+          IGEKICAgICMgZGltZW5zaW9uIGNhbGxlZCBgbmFtZWAgaXMgc3RpbGwgZ3JhZGVkIChQcmlzbSBlOGE5NDc1M2UzZGIpLgogICAg
+          c2tpcCA9IFtGYWxzZV0gKiBsZW4obGluZXMpCiAgICBibG9ja19pbmRlbnQgPSBOb25lICAgICAgICAgICAgICAgICAgICAgICAg
+          ICAgICAjIGluc2lkZSBhIHJ1bjovbmFtZTogYmxvY2sgc2NhbGFyIGRlZXBlciB0aGFuIHRoaXMKICAgIG1hdHJpeF9pbmRlbnQg
+          PSBOb25lICAgICAgICAgICAgICAgICAgICAgICAgICAgICMgaW5zaWRlIGEgYG1hdHJpeDpgIG1hcHBpbmcgZGVlcGVyIHRoYW4g
+          dGhpcwogICAgZm9yIGksIHJhdyBpbiBlbnVtZXJhdGUobGluZXMpOgogICAgICAgIGluZGVudCA9IGxlbihyYXcpIC0gbGVuKHJh
+          dy5sc3RyaXAoKSkKICAgICAgICBpZiBibG9ja19pbmRlbnQgaXMgbm90IE5vbmU6CiAgICAgICAgICAgIGlmIHJhdy5zdHJpcCgp
+          ID09ICIiIG9yIGluZGVudCA+IGJsb2NrX2luZGVudDoKICAgICAgICAgICAgICAgIHNraXBbaV0gPSBUcnVlCiAgICAgICAgICAg
+          ICAgICBjb250aW51ZQogICAgICAgICAgICBibG9ja19pbmRlbnQgPSBOb25lCiAgICAgICAgY29kZSwgXyA9IHN0cmlwX2NvbW1l
+          bnQocmF3KQogICAgICAgIGlmIG5vdCBjb2RlLnN0cmlwKCk6CiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgaWYgbWF0cml4
+          X2luZGVudCBpcyBub3QgTm9uZSBhbmQgaW5kZW50IDw9IG1hdHJpeF9pbmRlbnQ6CiAgICAgICAgICAgIG1hdHJpeF9pbmRlbnQg
+          PSBOb25lCiAgICAgICAgbSA9IEtFWS5tYXRjaChjb2RlKQogICAgICAgIGtleSA9IG0uZ3JvdXAoMykuc3RyaXAoIidcIiIpIGlm
+          IG0gZWxzZSBOb25lCiAgICAgICAgaWYga2V5ID09ICJtYXRyaXgiIGFuZCBtYXRyaXhfaW5kZW50IGlzIE5vbmU6CiAgICAgICAg
+          ICAgIG1hdHJpeF9pbmRlbnQgPSBsZW4obS5ncm91cCgxKSkgKyAobGVuKG0uZ3JvdXAoMikpIGlmIG0uZ3JvdXAoMikgZWxzZSAw
+          KQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGlmIG1hdHJpeF9pbmRlbnQgaXMgTm9uZSBhbmQga2V5IGluIFNDUklQVF9L
+          RVlTIHwgUFJPU0VfS0VZUzoKICAgICAgICAgICAgc2tpcFtpXSA9IFRydWUKICAgICAgICAgICAgaWYgQkxPQ0tfU0NBTEFSLnNl
+          YXJjaChyYXcucnN0cmlwKCkpIG9yIGNvZGUucnN0cmlwKCkuZW5kc3dpdGgoIjoiKToKICAgICAgICAgICAgICAgIGJsb2NrX2lu
+          ZGVudCA9IGxlbihtLmdyb3VwKDEpKSArIChsZW4obS5ncm91cCgyKSkgaWYgbS5ncm91cCgyKSBlbHNlIDApCgogICAgam9iX3dh
+          aXZlcjogZGljdFtzdHIsIHN0ciB8IE5vbmVdID0ge30KICAgIGZvciBzLCBlLCBqIGluIGpvYnM6CiAgICAgICAgdyA9IE5vbmUK
+          ICAgICAgICBmb3IgayBpbiByYW5nZShzLCBlKToKICAgICAgICAgICAgaWYgc2tpcFtrXToKICAgICAgICAgICAgICAgIGNvbnRp
+          bnVlCiAgICAgICAgICAgIHIgPSB3YWl2ZXJfb2Yoc3RyaXBfY29tbWVudChsaW5lc1trXSlbMV0pCiAgICAgICAgICAgIGlmIHIg
+          aXMgbm90IE5vbmU6CiAgICAgICAgICAgICAgICB3ID0gciBpZiB3IGlzIE5vbmUgb3IgKHIgYW5kIG5vdCB3KSBlbHNlIHcKICAg
+          ICAgICBqb2Jfd2FpdmVyW2pdID0gdwoKICAgIGZpbmRpbmdzOiBsaXN0W3N0cl0gPSBbXQogICAgZm9yIGksIHJhdyBpbiBlbnVt
+          ZXJhdGUobGluZXMpOgogICAgICAgIGNvZGUsIGNvbW1lbnQgPSBzdHJpcF9jb21tZW50KHJhdykKICAgICAgICBpZiBza2lwW2ld
+          IG9yIG5vdCBjb2RlLnN0cmlwKCk6CiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgZm9yIGxtIGluIExBQkVMLmZpbmRpdGVy
+          KGNvZGUpOgogICAgICAgICAgICBsYWJlbCA9IGxtLmdyb3VwKDEpCiAgICAgICAgICAgIGlmIGxhYmVsLmxvd2VyKCkuc3RhcnRz
+          d2l0aCgidWJ1bnR1LSIpIGFuZCBjb2RlW21heCgwLCBsbS5zdGFydCgpIC0gMSldID09ICIvIjoKICAgICAgICAgICAgICAgIGNv
+          bnRpbnVlICAgICAgICAgICAgICAgICAgICAgICAgICAgICAjIGUuZy4gYW4gaW1hZ2UgcGF0aCBgLi4uL3VidW50dS0yNC4wNGAs
+          IG5vdCBhIGxhYmVsCiAgICAgICAgICAgIGxpbmVfdyA9IHdhaXZlcl9vZihjb21tZW50KQogICAgICAgICAgICBzcGFuID0gam9i
+          X2F0KGkpCiAgICAgICAgICAgIGlmIHNwYW46CiAgICAgICAgICAgICAgICB3ID0gbGluZV93IGlmIGxpbmVfdyBpcyBub3QgTm9u
+          ZSBlbHNlIGpvYl93YWl2ZXIuZ2V0KHNwYW5bMl0pCiAgICAgICAgICAgICAgICB3aGVyZSA9ICJqb2IgIiArIHNwYW5bMl0KICAg
+          ICAgICAgICAgZWxzZToKICAgICAgICAgICAgICAgIHByZXYgPSB3YWl2ZXJfb2Yoc3RyaXBfY29tbWVudChsaW5lc1tpIC0gMV0p
+          WzFdKSBpZiBpID4gMCBhbmQgbm90IHNraXBbaSAtIDFdIGVsc2UgTm9uZQogICAgICAgICAgICAgICAgdyA9IGxpbmVfdyBpZiBs
+          aW5lX3cgaXMgbm90IE5vbmUgZWxzZSBwcmV2CiAgICAgICAgICAgICAgICB3aGVyZSA9ICJ3b3JrZmxvdyBzY29wZSIKICAgICAg
+          ICAgICAgaWYgdzoKICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgIHdoeSA9ICIgKGAjIGhvc3RlZC1vazpgIGhh
+          cyBhbiBlbXB0eSByZWFzb24pIiBpZiB3ID09ICIiIGVsc2UgIiIKICAgICAgICAgICAgZmluZGluZ3MuYXBwZW5kKCJGSU5ESU5H
+          IHt9Ont9OiB7fSBpbiB7fXt9OiB7fSIuZm9ybWF0KHJlbCwgaSArIDEsIGxhYmVsLCB3aGVyZSwgd2h5LCByYXcuc3RyaXAoKSkp
+          CiAgICAgICAgICAgIGJyZWFrICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIyBvbmUgZmluZGluZyBwZXIgbGlu
+          ZQogICAgcmV0dXJuIGZpbmRpbmdzCgoKZGVmIGxpbnRfcm9vdChyb290OiBQYXRoKSAtPiB0dXBsZVtpbnQsIGxpc3Rbc3RyXV06
+          CiAgICB3ZiA9IHJvb3QgLyAiLmdpdGh1YiIgLyAid29ya2Zsb3dzIgogICAgZmlsZXMgPSBzb3J0ZWQocCBmb3IgcCBpbiB3Zi5n
+          bG9iKCIqIikgaWYgcC5zdWZmaXggaW4gKCIueW1sIiwgIi55YW1sIikgYW5kIHAuaXNfZmlsZSgpKSBpZiB3Zi5pc19kaXIoKSBl
+          bHNlIFtdCiAgICBvdXQ6IGxpc3Rbc3RyXSA9IFtdCiAgICBmb3IgcCBpbiBmaWxlczoKICAgICAgICB0cnk6CiAgICAgICAgICAg
+          IHRleHQgPSBwLnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgiKQogICAgICAgIGV4Y2VwdCAoT1NFcnJvciwgVW5pY29kZURlY29k
+          ZUVycm9yKSBhcyBleGM6CiAgICAgICAgICAgIG91dC5hcHBlbmQoIkZJTkRJTkcge306IHVucmVhZGFibGUgKHt9KSIuZm9ybWF0
+          KHAucmVsYXRpdmVfdG8ocm9vdCksIGV4YykpCiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgb3V0LmV4dGVuZChsaW50X3Rl
+          eHQodGV4dCwgc3RyKHAucmVsYXRpdmVfdG8ocm9vdCkpKSkKICAgIHJldHVybiBsZW4oZmlsZXMpLCBvdXQKCgpIRUFEID0gIm5h
+          bWU6IHRcbm9uOiBbcHVzaF1cbmpvYnM6XG4iCkNBU0VTID0gWwogICAgIyAobGFiZWwsIHdvcmtmbG93IHRleHQsIGV4cGVjdGVk
+          IGZpbmRpbmcgY291bnQpCiAgICAoImxpdGVyYWwgdWJ1bnR1LWxhdGVzdCIsIEhFQUQgKyAiICBhOlxuICAgIHJ1bnMtb246IHVi
+          dW50dS1sYXRlc3RcbiAgICBzdGVwczogW3tydW46ICd0cnVlJ31dXG4iLCAxKSwKICAgICgibGl0ZXJhbCB1YnVudHUtMjQuMDQi
+          LCBIRUFEICsgIiAgYTpcbiAgICBydW5zLW9uOiB1YnVudHUtMjQuMDRcbiIsIDEpLAogICAgKCJ2YXJzIGZhbGxiYWNrIiwgSEVB
+          RCArICIgIGE6XG4gICAgcnVucy1vbjogJHt7IHZhcnMuQ0lfTElHSFRfUlVOTkVSIHx8ICd1YnVudHUtbGF0ZXN0JyB9fVxuIiwg
+          MSksCiAgICAoImZyb21KU09OIGZhbGxiYWNrIiwgSEVBRCArICIgIGE6XG4gICAgcnVucy1vbjogJHt7IGZyb21KU09OKHZhcnMu
+          Q0lfUlVOTkVSX0xBQkVMUyB8fCAnW1widWJ1bnR1LWxhdGVzdFwiXScpIH19XG4iLCAxKSwKICAgICgic2VsZi1ob3N0ZWQgZnJv
+          bUpTT04gZmFsbGJhY2siLCBIRUFEICsgIiAgYTpcbiAgICBydW5zLW9uOiAke3sgZnJvbUpTT04odmFycy5DSV9SVU5ORVJfTEFC
+          RUxTIHx8ICdbXCJzZWxmLWhvc3RlZFwiLFwiaGVybWVzLWNpXCJdJykgfX1cbiIsIDApLAogICAgKCJwb29sIGxhYmVsIiwgSEVB
+          RCArICIgIGE6XG4gICAgcnVucy1vbjogJHt7IHZhcnMuQ0lfTElHSFRfUlVOTkVSIHx8ICdoZXJtZXMtY2knIH19XG4iLCAwKSwK
+          ICAgICgiYmxhY2tzbWl0aCBsYWJlbCIsIEhFQUQgKyAiICBhOlxuICAgIHJ1bnMtb246IGJsYWNrc21pdGgtNHZjcHUtdWJ1bnR1
+          LTI0MDRcbiIsIDApLAogICAgKCJtYXRyaXggZmxvdyBsaXN0IiwgSEVBRCArICIgIGE6XG4gICAgc3RyYXRlZ3k6XG4gICAgICBt
+          YXRyaXg6XG4gICAgICAgIG9zOiBbdWJ1bnR1LWxhdGVzdCwgd2luZG93cy1sYXRlc3RdXG4iCiAgICAgIiAgICBydW5zLW9uOiAk
+          e3sgbWF0cml4Lm9zIH19XG4iLCAxKSwKICAgICgibWF0cml4IGJsb2NrIGxpc3QiLCBIRUFEICsgIiAgYTpcbiAgICBzdHJhdGVn
+          eTpcbiAgICAgIG1hdHJpeDpcbiAgICAgICAgb3M6XG4gICAgICAgICAgLSBtYWNvcy0xNVxuICAgICAgICAgIC0gd2luZG93cy0y
+          MDIyXG4iCiAgICAgIiAgICBydW5zLW9uOiAke3sgbWF0cml4Lm9zIH19XG4iLCAyKSwKICAgICgibWF0cml4IGluY2x1ZGUgcnVu
+          bmVyIiwgSEVBRCArICIgIGE6XG4gICAgc3RyYXRlZ3k6XG4gICAgICBtYXRyaXg6XG4gICAgICAgIGluY2x1ZGU6XG4gICAgICAg
+          ICAgLSBydW5uZXI6IHdpbmRvd3MtMTEtYXJtXG4iLCAxKSwKICAgICgicmV1c2FibGUgd2l0aCBydW5uZXIiLCBIRUFEICsgIiAg
+          YTpcbiAgICB1c2VzOiBvL3IvLmdpdGh1Yi93b3JrZmxvd3MveC55bWxAYWJjXG4gICAgd2l0aDpcbiAgICAgIHJ1bm5lcjogdWJ1
+          bnR1LWxhdGVzdFxuIiwgMSksCiAgICAoInJldXNhYmxlIGlucHV0IGRlZmF1bHQiLCAib246XG4gIHdvcmtmbG93X2NhbGw6XG4g
+          ICAgaW5wdXRzOlxuICAgICAgcnVubmVyOlxuICAgICAgICB0eXBlOiBzdHJpbmdcbiIKICAgICAiICAgICAgICBkZWZhdWx0OiBc
+          InVidW50dS1sYXRlc3RcIlxuam9iczpcbiAgYTpcbiAgICBydW5zLW9uOiAke3sgaW5wdXRzLnJ1bm5lciB9fVxuIiwgMSksCiAg
+          ICAoImlucHV0IGRlZmF1bHQgd2FpdmVkIGFib3ZlIiwgIm9uOlxuICB3b3JrZmxvd19jYWxsOlxuICAgIGlucHV0czpcbiAgICAg
+          IHJ1bm5lcjpcbiAgICAgICAgIyBob3N0ZWQtb2s6IHB1YmxpYyBjYWxsZXJcbiIKICAgICAiICAgICAgICBkZWZhdWx0OiBcInVi
+          dW50dS1sYXRlc3RcIlxuam9iczpcbiAgYTpcbiAgICBydW5zLW9uOiAke3sgaW5wdXRzLnJ1bm5lciB9fVxuIiwgMCksCiAgICAo
+          InRlcm5hcnkgbWFjb3MiLCBIRUFEICsgIiAgYTpcbiAgICBydW5zLW9uOiAke3sgaW5wdXRzLmFyY2ggPT0gJ3g2NCcgJiYgJ21h
+          Y29zLTE1LWludGVsJyB8fCAnbWFjb3MtMTUnIH19XG4iLCAxKSwKICAgICgibGluZSB3YWl2ZXIiLCBIRUFEICsgIiAgYTpcbiAg
+          ICBydW5zLW9uOiB3aW5kb3dzLWxhdGVzdCAgIyBob3N0ZWQtb2s6IG5vIHNlbGYtaG9zdGVkIFdpbmRvd3MgcnVubmVyIChBY2Up
+          XG4iLCAwKSwKICAgICgiam9iIHdhaXZlciBjb3ZlcnMgbWF0cml4IiwgSEVBRCArICIgIHdpbjpcbiAgICAjIGhvc3RlZC1vazog
+          V2luZG93cyBidWlsZCBtYXRyaXgsIG5vIHNlbGYtaG9zdGVkIHJ1bm5lclxuICAgIHN0cmF0ZWd5OlxuIgogICAgICIgICAgICBt
+          YXRyaXg6XG4gICAgICAgIG9zOiBbd2luZG93cy1sYXRlc3QsIHdpbmRvd3MtMjAyMl1cbiAgICBydW5zLW9uOiAke3sgbWF0cml4
+          Lm9zIH19XG4iLCAwKSwKICAgICgiam9iIHdhaXZlciBkb2VzIG5vdCBsZWFrIiwgSEVBRCArICIgIHdpbjpcbiAgICAjIGhvc3Rl
+          ZC1vazogV2luZG93cyBidWlsZFxuICAgIHJ1bnMtb246IHdpbmRvd3MtbGF0ZXN0XG4iCiAgICAgIiAgbGluOlxuICAgIHJ1bnMt
+          b246IHVidW50dS1sYXRlc3RcbiIsIDEpLAogICAgKCJlbXB0eSB3YWl2ZXIiLCBIRUFEICsgIiAgYTpcbiAgICBydW5zLW9uOiB1
+          YnVudHUtbGF0ZXN0ICAjIGhvc3RlZC1vazpcbiIsIDEpLAogICAgKCJvdGhlciB3YWl2ZXIgd29yZCIsIEhFQUQgKyAiICBhOlxu
+          ICAgIHJ1bnMtb246IHVidW50dS1sYXRlc3QgICMgZ2l0aHViLWhvc3RlZDogZnJlZVxuIiwgMSksCiAgICAoImNvbW1lbnQgb25s
+          eSIsIEhFQUQgKyAiICBhOlxuICAgICMgd2FzIHVidW50dS1sYXRlc3QgdW50aWwgMTAtMTZcbiAgICBydW5zLW9uOiBoZXJtZXMt
+          Y2kgICMgbm90IHVidW50dS0yNC4wNCBhbnkgbW9yZVxuIiwgMCksCiAgICAoInJ1biBibG9jayBtZW50aW9ucyBsYWJlbCIsIEhF
+          QUQgKyAiICBhOlxuICAgIHJ1bnMtb246IGhlcm1lcy1jaVxuICAgIHN0ZXBzOlxuICAgICAgLSBydW46IHxcbiIKICAgICAiICAg
+          ICAgICAgIGVjaG8gdWJ1bnR1LWxhdGVzdFxuICAgICAgICAgIGRvY2tlciBwdWxsIHVidW50dS0yNC4wNFxuICAgICAgLSBydW46
+          IGVjaG8gd2luZG93cy1sYXRlc3RcbiIsIDApLAogICAgKCJuYW1lL2Rlc2NyaXB0aW9uIHByb3NlIiwgSEVBRCArICIgIGE6XG4g
+          ICAgbmFtZTogcnVucyBsaWtlIHVidW50dS1sYXRlc3RcbiAgICBydW5zLW9uOiBoZXJtZXMtY2lcbiIsIDApLAogICAgKCJhZnRl
+          ciBydW4gYmxvY2sgcmVzdW1lcyIsIEhFQUQgKyAiICBhOlxuICAgIHJ1bnMtb246IGhlcm1lcy1jaVxuICAgIHN0ZXBzOlxuICAg
+          ICAgLSBydW46IHxcbiAgICAgICAgICBlY2hvIGhpXG4iCiAgICAgIiAgYjpcbiAgICBydW5zLW9uOiB1YnVudHUtbGF0ZXN0XG4i
+          LCAxKSwKICAgICgibGFiZWwgaW4gcXVvdGVzIHdpdGggaGFzaCIsIEhFQUQgKyAiICBhOlxuICAgIHJ1bnMtb246ICR7eyB2YXJz
+          LlggfHwgJ3VidW50dS1sYXRlc3QnIH19ICMgYyNkXG4iLCAxKSwKICAgICgiYXJtIGxhYmVsIiwgSEVBRCArICIgIGE6XG4gICAg
+          cnVucy1vbjogdWJ1bnR1LTI0LjA0LWFybVxuIiwgMSksCiAgICAoInVidW50dS1zbGltIChQcmlzbSA0ZjBiNWJiODY3MmIpIiwg
+          SEVBRCArICIgIGE6XG4gICAgcnVucy1vbjogdWJ1bnR1LXNsaW1cbiIsIDEpLAogICAgKCJoZXJlZG9jIHdhaXZlciBpZ25vcmVk
+          IChQcmlzbSA1NmMzZWMzZjBjODgpIiwgSEVBRCArICIgIGE6XG4gICAgcnVucy1vbjogdWJ1bnR1LWxhdGVzdFxuICAgIHN0ZXBz
+          OlxuICAgICAgLSBydW46IHxcbiIKICAgICAiICAgICAgICAgIGNhdCA+IGYueW1sIDw8RU9GXG4gICAgICAgICAgIyBob3N0ZWQt
+          b2s6IGZpeHR1cmVcbiAgICAgICAgICBFT0ZcbiIsIDEpLAogICAgKCJtYXRyaXggZGltIG5hbWVkIG5hbWUgKFByaXNtIGU4YTk0
+          NzUzZTNkYikiLCBIRUFEICsgIiAgYTpcbiAgICBzdHJhdGVneTpcbiAgICAgIG1hdHJpeDpcbiAgICAgICAgbmFtZTogW3VidW50
+          dS1sYXRlc3RdXG4iCiAgICAgIiAgICBydW5zLW9uOiAke3sgbWF0cml4Lm5hbWUgfX1cbiIsIDEpLAogICAgKCJtYXRyaXggYmxv
+          Y2sgZGltIG5hbWVkIGRlc2NyaXB0aW9uIiwgSEVBRCArICIgIGE6XG4gICAgc3RyYXRlZ3k6XG4gICAgICBtYXRyaXg6XG4gICAg
+          ICAgIGRlc2NyaXB0aW9uOlxuIgogICAgICIgICAgICAgICAgLSB3aW5kb3dzLWxhdGVzdFxuICAgIHJ1bnMtb246ICR7eyBtYXRy
+          aXguZGVzY3JpcHRpb24gfX1cbiIsIDEpLAogICAgKCJuYW1lIGFmdGVyIG1hdHJpeCBzdGlsbCBwcm9zZSIsIEhFQUQgKyAiICBh
+          OlxuICAgIHN0cmF0ZWd5OlxuICAgICAgbWF0cml4OlxuICAgICAgICBvczogW3hdXG4iCiAgICAgIiAgICBuYW1lOiBsaWtlIHVi
+          dW50dS1sYXRlc3RcbiAgICBydW5zLW9uOiBoZXJtZXMtY2lcbiIsIDApLAogICAgKCJpbWFnZSBwYXRoIG5vdCBsYWJlbCIsIEhF
+          QUQgKyAiICBhOlxuICAgIHJ1bnMtb246IGhlcm1lcy1jaVxuICAgIGNvbnRhaW5lcjogZ2hjci5pby94L3VidW50dS0yNC4wNFxu
+          IiwgMCksCl0KCgpkZWYgaXNfcHVibGljKGZsYWc6IHN0cikgLT4gYm9vbDoKICAgICIiIk9ubHkgYW4gZXhwbGljaXQgJ2ZhbHNl
+          JyAoR2l0SHViJ3MgYHJlcG9zaXRvcnkucHJpdmF0ZWAgcmVuZGVyaW5nKSBtZWFucyBwdWJsaWMuIEZhaWwgY2xvc2VkLiIiIgog
+          ICAgcmV0dXJuIHN0cihmbGFnKS5zdHJpcCgpLmxvd2VyKCkgPT0gImZhbHNlIgoKCmRlZiBzZWxmX3Rlc3QoKSAtPiBpbnQ6CiAg
+          ICBiYWQgPSAwCiAgICBmb3IgZmxhZywgd2FudCBpbiAoKCJmYWxzZSIsIFRydWUpLCAoIkZhbHNlIiwgVHJ1ZSksICgidHJ1ZSIs
+          IEZhbHNlKSwgKCIiLCBGYWxzZSksICgiZ2FyYmFnZSIsIEZhbHNlKSk6CiAgICAgICAgb2sgPSBpc19wdWJsaWMoZmxhZykgPT0g
+          d2FudAogICAgICAgIGJhZCArPSBub3Qgb2sKICAgICAgICBwcmludCgie30gezozMnN9IHdhbnQgcHVibGljPXt9IGdvdCB7fSIu
+          Zm9ybWF0KCJvayAgIiBpZiBvayBlbHNlICJGQUlMIiwgInJlcG8tcHJpdmF0ZT0lciIgJSBmbGFnLCB3YW50LAogICAgICAgICAg
+          ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgaXNfcHVibGljKGZsYWcpKSkKICAgIGZvciBsYWJl
+          bCwgdGV4dCwgd2FudCBpbiBDQVNFUzoKICAgICAgICBnb3QgPSBsaW50X3RleHQodGV4dCwgIndmLnltbCIpCiAgICAgICAgb2sg
+          PSBsZW4oZ290KSA9PSB3YW50CiAgICAgICAgYmFkICs9IG5vdCBvawogICAgICAgIHByaW50KCJ7fSB7OjMyc30gd2FudCB7fSBn
+          b3Qge317fSIuZm9ybWF0KCJvayAgIiBpZiBvayBlbHNlICJGQUlMIiwgbGFiZWwsIHdhbnQsIGxlbihnb3QpLAogICAgICAgICAg
+          ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIiIgaWYgb2sgZWxzZSAiICAiICsgIiB8ICIuam9pbihnb3Qp
+          KSkKICAgIHdpdGggdGVtcGZpbGUuVGVtcG9yYXJ5RGlyZWN0b3J5KCkgYXMgZDoKICAgICAgICBuLCBmID0gbGludF9yb290KFBh
+          dGgoZCkpCiAgICAgICAgb2sgPSBuID09IDAKICAgICAgICBiYWQgKz0gbm90IG9rCiAgICAgICAgcHJpbnQoInt9IHs6MzJzfSB3
+          YW50IDAgZmlsZXMgcmVhZCBnb3Qge30iLmZvcm1hdCgib2sgICIgaWYgb2sgZWxzZSAiRkFJTCIsICJibGluZCAobm8gd29ya2Zs
+          b3dzIGRpcikiLCBuKSkKICAgICAgICBvcy5tYWtlZGlycyhvcy5wYXRoLmpvaW4oZCwgIi5naXRodWIiLCAid29ya2Zsb3dzIikp
+          CiAgICAgICAgUGF0aChkLCAiLmdpdGh1YiIsICJ3b3JrZmxvd3MiLCAiYS55bWwiKS53cml0ZV90ZXh0KENBU0VTWzBdWzFdKQog
+          ICAgICAgIFBhdGgoZCwgIi5naXRodWIiLCAid29ya2Zsb3dzIiwgImIueWFtbCIpLndyaXRlX3RleHQoQ0FTRVNbNV1bMV0pCiAg
+          ICAgICAgbiwgZiA9IGxpbnRfcm9vdChQYXRoKGQpKQogICAgICAgIG9rID0gbiA9PSAyIGFuZCBsZW4oZikgPT0gMSBhbmQgImEu
+          eW1sOjUiIGluIGZbMF0KICAgICAgICBiYWQgKz0gbm90IG9rCiAgICAgICAgcHJpbnQoInt9IHs6MzJzfSB3YW50IDIgZmlsZXMv
+          MSBmaW5kaW5nIGF0IGEueW1sOjUgZ290IHt9L3t9Ii5mb3JtYXQoIm9rICAiIGlmIG9rIGVsc2UgIkZBSUwiLCAicm9vdCB3YWxr
+          IiwgbiwgZikpCiAgICBwcmludCgic2VsZi10ZXN0OiB7fSIuZm9ybWF0KCJQQVNTIiBpZiBub3QgYmFkIGVsc2UgIkZBSUwgKHt9
+          IGNhc2UocykpIi5mb3JtYXQoYmFkKSkpCiAgICByZXR1cm4gMCBpZiBub3QgYmFkIGVsc2UgMQoKCmRlZiBtYWluKGFyZ3Y9Tm9u
+          ZSkgLT4gaW50OgogICAgYXAgPSBhcmdwYXJzZS5Bcmd1bWVudFBhcnNlcihkZXNjcmlwdGlvbj0oX19kb2NfXyBvciAiIikuc3Bs
+          aXQoIlxuXG4iKVswXSkKICAgIGFwLmFkZF9hcmd1bWVudCgiLS1yb290IiwgZGVmYXVsdD1Ob25lLCBoZWxwPSJyZXBvIHJvb3Qg
+          KGRlZmF1bHQ6IHRoaXMgc2NyaXB0J3MgcmVwbykiKQogICAgYXAuYWRkX2FyZ3VtZW50KCItLXNlbGYtdGVzdCIsIGFjdGlvbj0i
+          c3RvcmVfdHJ1ZSIpCiAgICBhcC5hZGRfYXJndW1lbnQoIi0tdmVyYm9zZSIsIGFjdGlvbj0ic3RvcmVfdHJ1ZSIpCiAgICBhcC5h
+          ZGRfYXJndW1lbnQoIi0tcmVwby1wcml2YXRlIiwgZGVmYXVsdD1vcy5lbnZpcm9uLmdldCgiSE9TVEVEX1JVTk5FUl9MSU5UX1JF
+          UE9fUFJJVkFURSIsICIiKSwKICAgICAgICAgICAgICAgICAgICBoZWxwPSInZmFsc2UnID0gcHVibGljIHJlcG8gKGhvc3RlZCBt
+          aW51dGVzIGZyZWUpOiBza2lwLiBBbnl0aGluZyBlbHNlID0gcHJpdmF0ZSAoZGVmYXVsdCkuIikKICAgIGEgPSBhcC5wYXJzZV9h
+          cmdzKGFyZ3YpCiAgICBpZiBhLnNlbGZfdGVzdDoKICAgICAgICByZXR1cm4gc2VsZl90ZXN0KCkKICAgIGlmIGlzX3B1YmxpYyhh
+          LnJlcG9fcHJpdmF0ZSk6CiAgICAgICAgcHJpbnQoImhvc3RlZC1ydW5uZXItbGludDogc2tpcHBlZDogcHVibGljIHJlcG8gKEdp
+          dEh1Yi1ob3N0ZWQgbWludXRlcyBhcmUgJDAgdGhlcmUpIikKICAgICAgICByZXR1cm4gMAogICAgcm9vdCA9IFBhdGgoYS5yb290
+          KSBpZiBhLnJvb3QgZWxzZSBQYXRoLmN3ZCgpCiAgICBuLCBmaW5kaW5ncyA9IGxpbnRfcm9vdChyb290KQogICAgaWYgbiA9PSAw
+          OgogICAgICAgIHByaW50KCJob3N0ZWQtcnVubmVyLWxpbnQ6IEJMSU5EOiBubyB3b3JrZmxvdyBmaWxlcyB1bmRlciB7fS8uZ2l0
+          aHViL3dvcmtmbG93cyIuZm9ybWF0KHJvb3QpLCBmaWxlPXN5cy5zdGRlcnIpCiAgICAgICAgcmV0dXJuIDIKICAgIGZvciBmIGlu
+          IGZpbmRpbmdzOgogICAgICAgIHByaW50KGYpCiAgICBpZiBmaW5kaW5nczoKICAgICAgICBwcmludCgiaG9zdGVkLXJ1bm5lci1s
+          aW50OiB7fSBmaW5kaW5nKHMpIGluIHt9IHdvcmtmbG93IGZpbGUocykuIEZpeDogcnVucy1vbiB0aGUgbG9jYWwgcG9vbCAiCiAg
+          ICAgICAgICAgICAgIihgJHt7e3sgdmFycy5DSV9MSUdIVF9SVU5ORVIgfHwgJ2hlcm1lcy1jaScgfX19fWAsIG9yIGBmcm9tSlNP
+          Tih2YXJzLkNJX1JVTk5FUl9MQUJFTFMgfHwgIgogICAgICAgICAgICAgICInW1wic2VsZi1ob3N0ZWRcIixcImhlcm1lcy1jaVwi
+          XScpYCk7IGEgam9iIHRoYXQgdHJ1bHkgbmVlZHMgR2l0SHViLWhvc3RlZCBjYXJyaWVzICIKICAgICAgICAgICAgICAiYCMgaG9z
+          dGVkLW9rOiA8d2h5PmAuIi5mb3JtYXQobGVuKGZpbmRpbmdzKSwgbikpCiAgICAgICAgcmV0dXJuIDEKICAgIGlmIGEudmVyYm9z
+          ZToKICAgICAgICBwcmludCgiaG9zdGVkLXJ1bm5lci1saW50OiBjbGVhbiAoe30gd29ya2Zsb3cgZmlsZShzKSkiLmZvcm1hdChu
+          KSkKICAgIHJldHVybiAwCgoKaWYgX19uYW1lX18gPT0gIl9fbWFpbl9fIjoKICAgIHN5cy5leGl0KG1haW4oKSkK
+          B64
           python3 "$RUNNER_TEMP/hosted_runner_lint.py" --verbose

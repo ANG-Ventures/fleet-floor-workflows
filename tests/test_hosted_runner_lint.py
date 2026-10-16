@@ -4,6 +4,7 @@ Runs the EXACT scanner embedded in hosted-runner-lint.yml (extracted from the YA
 RED on a planted `runs-on: ubuntu-latest`, GREEN on a pool label / a `# hosted-ok:` waiver, SKIPPED for a public
 repo; and pins the embedded copy byte-identical to scripts/hosted_runner_lint.py.
 """
+import base64
 from pathlib import Path
 import os
 import re
@@ -23,9 +24,9 @@ def embedded():
     wf = yaml.load(WF.read_text(), Loader=yaml.BaseLoader)
     steps = [s for s in wf["jobs"]["hosted_runner_lint"]["steps"] if s.get("name") == "Hosted runner lint"]
     assert len(steps) == 1
-    m = re.search(r"<<'PY'\n(.*?)\nPY\n", steps[0]["run"], re.S)
+    m = re.search(r"<<'B64'\n(.*?)\nB64\n", steps[0]["run"], re.S)
     assert m, "heredoc not found"
-    return m.group(1) + "\n"
+    return base64.b64decode("".join(m.group(1).split())).decode()
 
 
 def run_embedded(cwd, *extra, private=None):
@@ -51,6 +52,17 @@ HEAD = "name: t\non: [push]\njobs:\n  a:\n"
 class HostedRunnerLintFloor(unittest.TestCase):
     def test_embedded_copy_is_the_script(self):
         self.assertEqual(embedded(), SRC.read_text())
+
+    def test_no_expression_text_outside_the_known_contexts(self):
+        # GitHub parses every `${{ }}` in a workflow, run: bodies included; a fixture string there is a
+        # startup_failure (00c29b6 runs 38903787635 / 38903824954: 0 jobs).
+        exprs = re.findall(r"\$\{\{(.*?)\}\}", WF.read_text())
+        allowed = ("inputs.runner", "github.event.repository.private", "github.workflow", "inputs.concurrency-suffix",
+                   "github.event_name == 'pull_request' && github.ref || github.run_id",
+                   "github.event_name == 'pull_request'")
+        self.assertTrue(exprs)
+        for e in exprs:
+            self.assertIn(e.strip(), allowed, e)
 
     def test_job_name_is_the_frozen_contract(self):
         wf = yaml.load(WF.read_text(), Loader=yaml.BaseLoader)
