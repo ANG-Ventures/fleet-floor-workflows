@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # fleet-floor copy of ANG-Ventures/hermes-home scripts/lints/hosted-runner-lint.py (card t_a8dc95de);
-# embedded byte-for-byte in .github/workflows/hosted-runner-lint.yml (tests/test_hosted_runner_lint.py).
+# embedded base64 in .github/workflows/hosted-runner-lint.yml (tests/test_hosted_runner_lint.py).
 # Only change vs the hermes-home copy: --root defaults to the current directory (the caller checkout).
 """hosted-runner-lint -- no workflow job may resolve to a GitHub-hosted (metered) runner label (t_a8dc95de).
 
@@ -51,17 +51,22 @@ from pathlib import Path
 LABEL = re.compile(r"(?<![\w.-])((?:ubuntu|windows|macos)-(?:latest|slim|\d[\w.]*)(?:-[\w.]+)*)(?![\w.-])", re.I)
 WAIVER = re.compile(r"#\s*hosted-ok\s*:(.*)$")
 KEY = re.compile(r"^(\s*)(-\s+)?([\w.-]+|\"[^\"]*\"|'[^']*')\s*:(?:\s|$)")
-BLOCK_SCALAR = re.compile(r":\s*[|>][+-]?\d*\s*(#.*)?$")
+# `|`, `>`, with chomping and indentation indicators in either legal order (`|2-`, `|-2`) (Prism e583356c7d8a).
+BLOCK_SCALAR = re.compile(r":\s*[|>](?:[1-9][+-]?|[+-][1-9]?)?\s*(#.*)?$")
 PROSE_KEYS = {"name", "description", "run-name"}
 SCRIPT_KEYS = {"run", "script", "shell-script"}
 
 
 def strip_comment(line: str) -> tuple[str, str]:
     """(code, comment). A `#` starts a comment at line start or after whitespace, outside quotes."""
-    quote = None
+    quote, esc = None, False
     for i, ch in enumerate(line):
         if quote:
-            if ch == quote:
+            if esc:
+                esc = False
+            elif ch == "\\" and quote == '"':
+                esc = True                          # YAML double-quoted escape: `\"` does not close (Prism 4405154e4c45)
+            elif ch == quote:
                 quote = None
         elif ch in ("'", '"'):
             quote = ch
@@ -112,18 +117,24 @@ def lint_text(text: str, rel: str) -> list[str]:
                 return s, e, j
         return None
 
-    # Pass 2: skip mask. Lines that are a script/prose value (a `run:`/`name:` key and its block-scalar
-    # body) are never a runner and never carry a waiver (Prism 56c3ec3f0c88: a heredoc line
-    # `# hosted-ok: x` must not waive the job). Inside a `matrix:` mapping every key is data, so a
-    # dimension called `name` is still graded (Prism e8a94753e3db).
+    # Pass 2: masks.
+    #   body[i]  -- line i is inside ANY block scalar (`key: |` ...): string data, so it never carries a waiver
+    #               (Prism 56c3ec3f0c88, 7e9cf82a1f86) and, outside a `matrix:`, is never graded.
+    #   skip[i]  -- line i is not graded: a block-scalar body as above, or an INLINE script/prose value
+    #               (`run: echo ubuntu-latest`, `name: ...`). A BARE `run:` / `name:` key opens a mapping (a job id,
+    #               an input declaration), never prose, so its children stay graded (Prism 6051d2f0bb8a).
+    #   Inside a `matrix:` mapping every key is data: a dimension called `name` is graded (Prism e8a94753e3db).
     skip = [False] * len(lines)
-    block_indent = None                             # inside a run:/name: block scalar deeper than this
+    body = [False] * len(lines)
+    block_indent = None                             # inside a block scalar body deeper than this
+    block_graded = False                            # that block scalar sits in a matrix: grade its lines
     matrix_indent = None                            # inside a `matrix:` mapping deeper than this
     for i, raw in enumerate(lines):
         indent = len(raw) - len(raw.lstrip())
         if block_indent is not None:
             if raw.strip() == "" or indent > block_indent:
-                skip[i] = True
+                body[i] = True
+                skip[i] = not block_graded
                 continue
             block_indent = None
         code, _ = strip_comment(raw)
@@ -136,16 +147,19 @@ def lint_text(text: str, rel: str) -> list[str]:
         if key == "matrix" and matrix_indent is None:
             matrix_indent = len(m.group(1)) + (len(m.group(2)) if m.group(2) else 0)
             continue
-        if matrix_indent is None and key in SCRIPT_KEYS | PROSE_KEYS:
-            skip[i] = True
-            if BLOCK_SCALAR.search(raw.rstrip()) or code.rstrip().endswith(":"):
-                block_indent = len(m.group(1)) + (len(m.group(2)) if m.group(2) else 0)
+        if m and BLOCK_SCALAR.search(raw.rstrip()):
+            block_indent = len(m.group(1)) + (len(m.group(2)) if m.group(2) else 0)
+            block_graded = matrix_indent is not None
+            skip[i] = matrix_indent is None and key in SCRIPT_KEYS | PROSE_KEYS
+            continue
+        if matrix_indent is None and key in SCRIPT_KEYS | PROSE_KEYS and not code.rstrip().endswith(":"):
+            skip[i] = True                           # inline script/prose value
 
     job_waiver: dict[str, str | None] = {}
     for s, e, j in jobs:
         w = None
         for k in range(s, e):
-            if skip[k]:
+            if body[k]:
                 continue
             r = waiver_of(strip_comment(lines[k])[1])
             if r is not None:
@@ -154,8 +168,12 @@ def lint_text(text: str, rel: str) -> list[str]:
 
     findings: list[str] = []
     for i, raw in enumerate(lines):
+        if skip[i]:
+            continue
         code, comment = strip_comment(raw)
-        if skip[i] or not code.strip():
+        if body[i]:
+            code, comment = raw, ""                   # a matrix block-scalar body: data, no comments
+        if not code.strip():
             continue
         for lm in LABEL.finditer(code):
             label = lm.group(1)
@@ -167,7 +185,7 @@ def lint_text(text: str, rel: str) -> list[str]:
                 w = line_w if line_w is not None else job_waiver.get(span[2])
                 where = "job " + span[2]
             else:
-                prev = waiver_of(strip_comment(lines[i - 1])[1]) if i > 0 and not skip[i - 1] else None
+                prev = waiver_of(strip_comment(lines[i - 1])[1]) if i > 0 and not body[i - 1] else None
                 w = line_w if line_w is not None else prev
                 where = "workflow scope"
             if w:
@@ -237,6 +255,21 @@ CASES = [
      "          - windows-latest\n    runs-on: ${{ matrix.description }}\n", 1),
     ("name after matrix still prose", HEAD + "  a:\n    strategy:\n      matrix:\n        os: [x]\n"
      "    name: like ubuntu-latest\n    runs-on: hermes-ci\n", 0),
+    ("job id named run (Prism 6051d2f0bb8a)", "on: [push]\njobs:\n  run:\n    runs-on: ubuntu-latest\n"
+     "    steps: [{run: 'true'}]\n", 1),
+    ("job id named name", "jobs:\n  name:\n    runs-on: ubuntu-latest\n", 1),
+    ("input named description keeps default", "on:\n  workflow_call:\n    inputs:\n      description:\n"
+     "        type: string\n        default: ubuntu-latest\njobs:\n  a:\n    runs-on: hermes-ci\n", 1),
+    ("run |2- body waiver ignored (Prism e583356c7d8a)", HEAD + "  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+     "      - run: |2-\n          # hosted-ok: fixture\n          true\n", 1),
+    ("run |-2 body waiver ignored", HEAD + "  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+     "      - run: >-2\n          # hosted-ok: fixture\n          true\n", 1),
+    ("env block waiver ignored (Prism 7e9cf82a1f86)", HEAD + "  a:\n    runs-on: ubuntu-latest\n    env:\n"
+     "      EXAMPLE: |\n        # hosted-ok: fixture\n    steps:\n      - run: 'true'\n", 1),
+    ("escaped quote waiver ignored (Prism 4405154e4c45)", HEAD + "  a:\n    runs-on: ubuntu-latest\n    env:\n"
+     "      NOTE: \"\\\" # hosted-ok: fixture\"\n    steps: [{run: true}]\n", 1),
+    ("real waiver after quoted value", HEAD + "  a:\n    env:\n      NOTE: \"a \\\" b\"  # hosted-ok: Windows build\n"
+     "    runs-on: windows-latest\n", 0),
     ("image path not label", HEAD + "  a:\n    runs-on: hermes-ci\n    container: ghcr.io/x/ubuntu-24.04\n", 0),
 ]
 
