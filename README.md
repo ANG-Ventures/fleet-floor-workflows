@@ -256,6 +256,17 @@ reviewed SHA-bump caller PR lands in a target repo.
 
 # floor v1: provisioning + Phase-2 live-proven 2026-06-30
 
+### Hosted runner lint (`hosted-runner-lint.yml`, job `hosted_runner_lint`)
+
+Card t_a8dc95de. In a PRIVATE repo, any workflow code line naming a GitHub-hosted label (`ubuntu-*`, `windows-*`,
+`macos-*`: a literal `runs-on`, a matrix value, `with: runner:`, an input default, or the fallback of
+`vars.X || 'ubuntu-latest'`) FAILs with `path:line`, unless the line or its job carries `# hosted-ok: <why>`.
+A public caller (`github.event.repository.private == false`) is skipped: its hosted minutes are $0. Why:
+ANG-Ventures Oct 1-16 2026 Actions GROSS $2,730.90 against NET $296.36, mostly unset-var fallbacks.
+Scanner source: `scripts/hosted_runner_lint.py` (a copy of hermes-home `scripts/lints/hosted-runner-lint.py`),
+embedded in the workflow byte-for-byte. Caller: [`templates/hosted-runner-lint.yml`](templates/hosted-runner-lint.yml).
+Contract: `tests/test_hosted_runner_lint.py`.
+
 ### NE-pair floor (`ne-pair-floor.yml`, job `ne_pair_floor`)
 
 Card t_ad5331c9. Any of the GrowthBook-off family — `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,

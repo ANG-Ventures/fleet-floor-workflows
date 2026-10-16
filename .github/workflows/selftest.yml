@@ -290,6 +290,15 @@ jobs:
       path: ne-pair-sample/good
       concurrency-suffix: selftest
 
+  # --- hosted runner lint (hosted-runner-lint.yml, t_a8dc95de): a PRIVATE repo never resolves to a metered
+  # GitHub-hosted label. The red/green contract (embedded scanner == scripts/hosted_runner_lint.py, planted
+  # ubuntu-latest RED, public skipped) runs in timeout_contract (tests/test_hosted_runner_lint.py); this proves
+  # the reusable workflow runs on a real runner (this repo is public, so the lint reports skipped).
+  hosted_runner_lint:
+    uses: ./.github/workflows/hosted-runner-lint.yml
+    with:
+      concurrency-suffix: selftest
+
   # Steps-mode composite actions (t_a9a0e768): ONE job runs both floor lints as steps, the shape a
   # caller uses to stop paying a whole billed minute per lint. Green on the clean sample, RED on the
   # red-team tree (the action must keep its teeth), and override-lint passes on this repo's own PRs.
