@@ -1,0 +1,26 @@
+# Hosted runner lint -- thin caller (t_a8dc95de). A PRIVATE repo's workflows must not resolve to a metered
+# GitHub-hosted label (`ubuntu-*` / `windows-*` / `macos-*`, including a `vars.X || 'ubuntu-latest'` fallback)
+# unless the job carries `# hosted-ok: <why>`. A public repo is skipped (its hosted minutes are $0).
+# Copy to .github/workflows/hosted-runner-lint.yml. Pin `uses:` to an IMMUTABLE 40-hex commit SHA of
+# ANG-Ventures/fleet-floor-workflows (never a moving tag).
+#
+# Placeholders:
+#   __FLOOR_SHA__   40-char commit SHA of the central repo
+#   __RUNNER__      private ANG-Ventures repo: hermes-ci (the local pool). Public repo: ubuntu-latest.
+name: hosted-runner-lint
+
+# path-filter-exempt: no `paths:` on purpose (README "Caller path filters", the 3,000-file limit); the lint
+# reads only .github/workflows and takes ~1 s.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  hosted_runner_lint:
+    uses: ANG-Ventures/fleet-floor-workflows/.github/workflows/hosted-runner-lint.yml@__FLOOR_SHA__
+    with:
+      runner: __RUNNER__
