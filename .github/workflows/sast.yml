@@ -120,60 +120,67 @@ jobs:
         if: inputs.artifact-retention-lint && github.event_name == 'pull_request'
         run: |
           set -euo pipefail
+          pip install -q "PyYAML>=6"
           python - /tmp/wf-changed.txt <<'PY'
           # Card t_eade26e1: 2026-10-16 the org hit its Actions artifact-storage quota. 2,900 prism-router
           # junit/log artifacts sat on the 30-day default, and 7 approved PRs were blocked for 2.5 h.
-          # Every upload-artifact step names its own retention-days, 1..7. A longer one carries
-          # `# artifact-retention-ok: <why>` inside the step.
-          import re, sys
+          # Every upload-artifact step names its own with.retention-days, 1..7. A longer one carries
+          # `# artifact-retention-ok: <why>` inside the step. Steps are read from the YAML node tree, so a
+          # flow-style step `- {uses: ..., with: {...}}` counts and text in a step name never does.
+          import re, sys, yaml
           MAX_DAYS = 7
-          USES = re.compile(r"^(\s*)(-\s+)?uses:\s*['\"]?actions/upload-artifact[@/]")
-          DASH = re.compile(r"^(\s*)-\s")
-          RET = re.compile(r"(?:^|[\s{,])retention-days\s*:\s*['\"]?([^'\",}\s#]+)")
+          UPLOAD = re.compile(r"^actions/upload-artifact[@/]")
           WAIVER = re.compile(r"#\s*artifact-retention-ok:(.*)$")
 
-          def code(line):
-              return re.split(r"(?:^|\s)#", line, maxsplit=1)[0]
+          def scalar(node):
+              return node.value if isinstance(node, yaml.ScalarNode) else None
 
-          def indent(line):
-              return len(line) - len(line.lstrip())
+          def steps(node):
+              # every mapping node whose `uses` is an upload-artifact action
+              if isinstance(node, yaml.MappingNode):
+                  keys = {scalar(k): v for k, v in node.value}
+                  if UPLOAD.match(scalar(keys.get("uses")) or ""):
+                      yield node, keys
+                  for _, v in node.value:
+                      yield from steps(v)
+              elif isinstance(node, yaml.SequenceNode):
+                  for v in node.value:
+                      yield from steps(v)
 
           bad = 0
           for path in [l.strip() for l in open(sys.argv[1]) if l.strip()]:
-              lines = open(path).read().splitlines()
-              for i, line in enumerate(lines):
-                  m = USES.match(line)
-                  if not m:
-                      continue
-                  if m.group(2):
-                      start, dash = i, len(m.group(1))
-                  else:
-                      start = next((j for j in range(i - 1, -1, -1) if DASH.match(lines[j])
-                                    and len(DASH.match(lines[j]).group(1)) < len(m.group(1))), i)
-                      dash = indent(lines[start])
-                  end = next((j for j in range(start + 1, len(lines)) if lines[j].strip()
-                              and not lines[j].lstrip().startswith("#") and indent(lines[j]) <= dash), len(lines))
-                  block = lines[start:end]
-                  vals = [r.group(1) for l in block for r in [RET.search(code(l))] if r]
-                  waivers = [w.group(1).strip() for l in block for w in [WAIVER.search(l)] if w]
+              text = open(path).read()
+              lines = text.splitlines()
+              try:
+                  root = yaml.compose(text)
+              except yaml.YAMLError as e:
+                  print("::error file=%s::unparsable workflow (%s)" % (path, type(e).__name__)); bad += 1; continue
+              for node, keys in steps(root) if root is not None else ():
+                  line = node.start_mark.line
+                  end = max(node.end_mark.line, line + 1)
+                  with_ = keys.get("with")
+                  val = None
+                  if isinstance(with_, yaml.MappingNode):
+                      val = next((scalar(v) for k, v in with_.value if scalar(k) == "retention-days"), None)
                   why = None
-                  if not vals:
-                      why = "no retention-days (the default is the repo's 90 days)"
-                  elif vals[0].startswith("$"):
+                  if val is None:
+                      why = "no with.retention-days (the default is the repo's 90 days)"
+                  elif val.strip().startswith("${{"):
                       why = None  # an expression: the caller decides, nothing to read here
-                  elif not vals[0].isdigit() or int(vals[0]) == 0:
-                      why = "retention-days %s is not 1..%d (0 means the repo default, 90 days)" % (vals[0], MAX_DAYS)
-                  elif int(vals[0]) > MAX_DAYS:
-                      why = "retention-days %s > %d" % (vals[0], MAX_DAYS)
+                  elif not val.strip().isdigit() or int(val) == 0:
+                      why = "retention-days %s is not 1..%d (0 means the repo default, 90 days)" % (val, MAX_DAYS)
+                  elif int(val) > MAX_DAYS:
+                      why = "retention-days %s > %d" % (val, MAX_DAYS)
+                  waivers = [w.group(1).strip() for l in lines[line:end] for w in [WAIVER.search(l)] if w]
                   if why and waivers and all(waivers):
-                      print("waived: %s:%d (%s)" % (path, i + 1, waivers[0]))
+                      print("waived: %s:%d (%s)" % (path, line + 1, waivers[0]))
                       continue
                   if why and waivers:
                       why += "; the `# artifact-retention-ok:` waiver needs a reason"
                   if why:
                       print("::error file=%s,line=%d::upload-artifact step: %s. Set retention-days: 2 for "
                             "junit/logs/coverage, <= 7 for a dist another store also holds, or add "
-                            "`# artifact-retention-ok: <why>` in the step." % (path, i + 1, why))
+                            "`# artifact-retention-ok: <why>` in the step." % (path, line + 1, why))
                       bad += 1
           print("artifact retention lint: %d finding(s)" % bad)
           sys.exit(1 if bad else 0)

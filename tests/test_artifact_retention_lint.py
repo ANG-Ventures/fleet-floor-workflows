@@ -30,6 +30,15 @@ CASES = {
     "red_next_step_has_it.yml": (HEAD + UP + "      - uses: actions/upload-artifact@v4\n        with:\n"
                                  "          retention-days: 2\n", 1),
     "red_empty_waiver.yml": (HEAD + UP + "          retention-days: 30  # artifact-retention-ok:\n", 1),
+    # Prism 5e3bf8caa26f: a flow-style step mapping is a step
+    "red_flow_step_missing.yml": (HEAD + "      - {uses: actions/upload-artifact@v4, with: {name: logs, path: logs}}\n", 1),
+    # Prism 85420210ccdb: retention text in the step NAME is not the input
+    "red_name_says_2.yml": (HEAD + "      - name: 'Upload logs, retention-days: 2'\n        uses: actions/upload-artifact@v4\n"
+                            "        with:\n          name: j\n          retention-days: 30\n", 1),
+    "red_name_says_2_no_input.yml": (HEAD + "      - name: 'Upload logs, retention-days: 2'\n"
+                                     "        uses: actions/upload-artifact@v4\n        with: {name: j}\n", 1),
+    "red_unparsable.yml": (HEAD + "      - uses: actions/upload-artifact@v4\n        with: [\n", 1),
+    "green_flow_step.yml": (HEAD + "      - {uses: actions/upload-artifact@v4, with: {name: logs, retention-days: 2}}\n", 0),
     "green_2.yml": (HEAD + UP + "          retention-days: 2\n", 0),
     "green_7_quoted.yml": (HEAD + UP + "          retention-days: '7'  # dist; GHCR holds it\n", 0),
     "green_flow.yml": (HEAD + "      - uses: actions/upload-artifact@v4\n        with: {name: j, path: j.xml, retention-days: 1}\n", 0),
@@ -48,7 +57,7 @@ def step_script():
 
 
 def run_lint(files):
-    run = step_script()["run"]
+    run = step_script()["run"].replace("pip install -q \"PyYAML>=6\"", "true")
     with tempfile.TemporaryDirectory() as d:
         lst = Path(d) / "wf-changed.txt"
         names = []
@@ -70,7 +79,7 @@ class ArtifactRetentionLint(unittest.TestCase):
     def test_finding_names_the_line(self):
         rc, out = run_lint({"red_missing.yml": CASES["red_missing.yml"]})
         self.assertEqual(rc, 1, out)
-        self.assertIn("red_missing.yml,line=7::upload-artifact step: no retention-days", out)
+        self.assertIn("red_missing.yml,line=6::upload-artifact step: no with.retention-days", out)
         self.assertIn("artifact retention lint: 1 finding(s)", out)
 
     def test_step_is_pr_only_and_default_on(self):
