@@ -129,7 +129,8 @@ jobs:
           # flow-style step `- {uses: ..., with: {...}}` counts and text in a step name never does.
           import re, sys, yaml
           MAX_DAYS = 7
-          UPLOAD = re.compile(r"^actions/upload-artifact[@/]")
+          UPLOAD = re.compile(r"^actions/upload-artifact[@/]", re.I)  # GitHub resolves owner/repo case-insensitively
+          EXPR = "$" + "{{"  # never a literal opener here: GitHub parses every one in a workflow file
           WAIVER = re.compile(r"#\s*artifact-retention-ok:(.*)$")
 
           def scalar(node):
@@ -155,6 +156,21 @@ jobs:
                   root = yaml.compose(text)
               except yaml.YAMLError as e:
                   print("::error file=%s::unparsable workflow (%s)" % (path, type(e).__name__)); bad += 1; continue
+              starts = [0]
+              for l in lines:
+                  starts.append(starts[-1] + len(l) + 1)
+
+              def scalars(node):
+                  if isinstance(node, yaml.ScalarNode):
+                      yield node.start_mark.index, node.end_mark.index
+                  elif isinstance(node, yaml.MappingNode):
+                      for k, v in node.value:
+                          yield from scalars(k)
+                          yield from scalars(v)
+                  elif isinstance(node, yaml.SequenceNode):
+                      for v in node.value:
+                          yield from scalars(v)
+
               for node, keys in steps(root) if root is not None else ():
                   line = node.start_mark.line
                   end = max(node.end_mark.line, line + 1)
@@ -165,13 +181,17 @@ jobs:
                   why = None
                   if val is None:
                       why = "no with.retention-days (the default is the repo's 90 days)"
-                  elif val.strip().startswith("${{"):
+                  elif val.strip().startswith(EXPR):
                       why = None  # an expression: the caller decides, nothing to read here
                   elif not val.strip().isdigit() or int(val) == 0:
                       why = "retention-days %s is not 1..%d (0 means the repo default, 90 days)" % (val, MAX_DAYS)
                   elif int(val) > MAX_DAYS:
                       why = "retention-days %s > %d" % (val, MAX_DAYS)
-                  waivers = [w.group(1).strip() for l in lines[line:end] for w in [WAIVER.search(l)] if w]
+                  # a waiver is a COMMENT: a marker inside any scalar of the step (a name, a path) does not count
+                  spans = list(scalars(node))
+                  waivers = [w.group(1).strip() for n in range(line, min(end + 1, len(lines)))
+                             for w in WAIVER.finditer(lines[n])
+                             if not any(a <= starts[n] + w.start() < b for a, b in spans)]
                   if why and waivers and all(waivers):
                       print("waived: %s:%d (%s)" % (path, line + 1, waivers[0]))
                       continue

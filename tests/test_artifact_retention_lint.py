@@ -39,6 +39,13 @@ CASES = {
                                      "        uses: actions/upload-artifact@v4\n        with: {name: j}\n", 1),
     "red_unparsable.yml": (HEAD + "      - uses: actions/upload-artifact@v4\n        with: [\n", 1),
     "green_flow_step.yml": (HEAD + "      - {uses: actions/upload-artifact@v4, with: {name: logs, retention-days: 2}}\n", 0),
+    # Prism 6416394e1d34: the marker inside a quoted value is not a waiver
+    "red_marker_in_name.yml": (HEAD + "      - name: \"Upload # artifact-retention-ok: archived elsewhere\"\n"
+                               "        uses: actions/upload-artifact@v4\n", 1),
+    "red_marker_in_path.yml": (HEAD + "      - uses: actions/upload-artifact@v4\n        with:\n"
+                               "          path: '# artifact-retention-ok: x'\n          retention-days: 30\n", 1),
+    # Prism 4c8182282c33: owner/repo are case-insensitive
+    "red_mixed_case.yml": (HEAD + "      - uses: Actions/Upload-Artifact@v4\n", 1),
     "green_2.yml": (HEAD + UP + "          retention-days: 2\n", 0),
     "green_7_quoted.yml": (HEAD + UP + "          retention-days: '7'  # dist; GHCR holds it\n", 0),
     "green_flow.yml": (HEAD + "      - uses: actions/upload-artifact@v4\n        with: {name: j, path: j.xml, retention-days: 1}\n", 0),
@@ -91,6 +98,11 @@ class ArtifactRetentionLint(unittest.TestCase):
         # the changed-file list it reads is written even when R14 is switched off
         lst = [x for x in wf["jobs"]["sast"]["steps"] if x.get("name") == "Changed workflow files (path-filter lint input)"]
         self.assertIn("inputs.artifact-retention-lint", lst[0]["if"])
+
+    def test_no_expression_opener_in_the_step_script(self):
+        # Prism ffae82d9eeed: GitHub parses every `${{` in a workflow, run: bodies included; an unclosed one
+        # is a startup_failure of every caller (head c24b0b1: selftest.yml + sast.yml runs failed, 0 jobs).
+        self.assertNotIn("${{", step_script()["run"])
 
     def test_floor_repo_own_workflows_pass(self):
         files = {p.name: (p.read_text(), 0) for p in (ROOT / ".github/workflows").glob("*.yml")}
