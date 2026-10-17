@@ -212,6 +212,19 @@ ci-speed-lint R14 (Kyzcreig/fleet-ops-scripts). Callers can pass
 `workflow-path-filter-lint: false` to the sast component, but that is a reviewed caller change.
 Contract + red/green cases: `tests/test_workflow_path_filter_lint.py`.
 
+### Artifact retention lint (`sast.yml`, step `Artifact retention lint`)
+
+`sast.yml` also fails a **pull_request** that adds or modifies a workflow containing an
+`actions/upload-artifact` step with no `retention-days`, `retention-days: 0`, or more than 7 days.
+Without the key, an artifact lives for the repo default (90 days in ANG-Ventures). On 2026-10-16
+2,900 prism-router junit/log artifacts on the 30-day default, plus 6 image tars, used up the org's
+monthly private storage quota, and every private upload-artifact step went red (card t_eade26e1).
+Use `retention-days: 2` for junit, logs and coverage, and at most 7 for a dist that another store
+(GHCR, a release) also holds. A step that really needs longer carries `# artifact-retention-ok: <why>`
+inside the step. An expression value (`${{ inputs.keep }}`) passes. Like R14, the lint checks only the
+files the PR changes. Callers can pass `artifact-retention-lint: false`, which is a reviewed caller
+change. Contract + red/green cases: `tests/test_artifact_retention_lint.py`.
+
 ### Override lint (`override-lint.yml`, job `override_lint`)
 
 A pull request that **adds a refusal** must say how an operator gets past it, or say on purpose
