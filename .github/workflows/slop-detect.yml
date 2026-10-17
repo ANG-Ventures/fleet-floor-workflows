@@ -117,4 +117,4 @@ jobs:
         with:
           name: slop-findings-${{ github.run_id }}
           path: /tmp/findings.json
-          retention-days: 14
+          retention-days: 2  # the job summary + annotations carry the findings; this JSON is a same-week copy (t_eade26e1)

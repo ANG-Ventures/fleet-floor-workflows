@@ -31,6 +31,13 @@ on:
           Opt a workflow out on purpose with a line `# path-filter-exempt: <why>`.
         type: boolean
         default: true
+      artifact-retention-lint:
+        description: >-
+          Fail a pull_request whose added/modified workflow has an actions/upload-artifact step with no
+          retention-days (the default is the repo's 90 days), 0, or more than 7 days. Opt one step out on
+          purpose with `# artifact-retention-ok: <why>` inside that step.
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -63,7 +70,7 @@ jobs:
           cache-dependency-path: .github/workflows/*.yml
 
       - name: Changed workflow files (path-filter lint input)
-        if: inputs.workflow-path-filter-lint && github.event_name == 'pull_request'
+        if: (inputs.workflow-path-filter-lint || inputs.artifact-retention-lint) && github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           # HEAD = refs/pull/N/merge; HEAD^1 = base tip. Only files this PR adds/modifies/renames.
@@ -106,6 +113,69 @@ jobs:
                         "(e.g. the pull_request run is a required check)." % (path, trig))
                   bad += 1
           print("workflow path-filter lint: %d finding(s)" % bad)
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Artifact retention lint
+        if: inputs.artifact-retention-lint && github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          python - /tmp/wf-changed.txt <<'PY'
+          # Card t_eade26e1: 2026-10-16 the org hit its Actions artifact-storage quota. 2,900 prism-router
+          # junit/log artifacts sat on the 30-day default, and 7 approved PRs were blocked for 2.5 h.
+          # Every upload-artifact step names its own retention-days, 1..7. A longer one carries
+          # `# artifact-retention-ok: <why>` inside the step.
+          import re, sys
+          MAX_DAYS = 7
+          USES = re.compile(r"^(\s*)(-\s+)?uses:\s*['\"]?actions/upload-artifact[@/]")
+          DASH = re.compile(r"^(\s*)-\s")
+          RET = re.compile(r"(?:^|[\s{,])retention-days\s*:\s*['\"]?([^'\",}\s#]+)")
+          WAIVER = re.compile(r"#\s*artifact-retention-ok:(.*)$")
+
+          def code(line):
+              return re.split(r"(?:^|\s)#", line, maxsplit=1)[0]
+
+          def indent(line):
+              return len(line) - len(line.lstrip())
+
+          bad = 0
+          for path in [l.strip() for l in open(sys.argv[1]) if l.strip()]:
+              lines = open(path).read().splitlines()
+              for i, line in enumerate(lines):
+                  m = USES.match(line)
+                  if not m:
+                      continue
+                  if m.group(2):
+                      start, dash = i, len(m.group(1))
+                  else:
+                      start = next((j for j in range(i - 1, -1, -1) if DASH.match(lines[j])
+                                    and len(DASH.match(lines[j]).group(1)) < len(m.group(1))), i)
+                      dash = indent(lines[start])
+                  end = next((j for j in range(start + 1, len(lines)) if lines[j].strip()
+                              and not lines[j].lstrip().startswith("#") and indent(lines[j]) <= dash), len(lines))
+                  block = lines[start:end]
+                  vals = [r.group(1) for l in block for r in [RET.search(code(l))] if r]
+                  waivers = [w.group(1).strip() for l in block for w in [WAIVER.search(l)] if w]
+                  why = None
+                  if not vals:
+                      why = "no retention-days (the default is the repo's 90 days)"
+                  elif vals[0].startswith("$"):
+                      why = None  # an expression: the caller decides, nothing to read here
+                  elif not vals[0].isdigit() or int(vals[0]) == 0:
+                      why = "retention-days %s is not 1..%d (0 means the repo default, 90 days)" % (vals[0], MAX_DAYS)
+                  elif int(vals[0]) > MAX_DAYS:
+                      why = "retention-days %s > %d" % (vals[0], MAX_DAYS)
+                  if why and waivers and all(waivers):
+                      print("waived: %s:%d (%s)" % (path, i + 1, waivers[0]))
+                      continue
+                  if why and waivers:
+                      why += "; the `# artifact-retention-ok:` waiver needs a reason"
+                  if why:
+                      print("::error file=%s,line=%d::upload-artifact step: %s. Set retention-days: 2 for "
+                            "junit/logs/coverage, <= 7 for a dist another store also holds, or add "
+                            "`# artifact-retention-ok: <why>` in the step." % (path, i + 1, why))
+                      bad += 1
+          print("artifact retention lint: %d finding(s)" % bad)
           sys.exit(1 if bad else 0)
           PY
 
