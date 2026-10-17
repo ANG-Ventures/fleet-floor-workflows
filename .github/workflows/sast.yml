@@ -31,6 +31,13 @@ on:
           Opt a workflow out on purpose with a line `# path-filter-exempt: <why>`.
         type: boolean
         default: true
+      artifact-retention-lint:
+        description: >-
+          Fail a pull_request whose added/modified workflow has an actions/upload-artifact step with no
+          retention-days (the default is the repo's 90 days), 0, or more than 7 days. Opt one step out on
+          purpose with `# artifact-retention-ok: <why>` inside that step.
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -63,7 +70,7 @@ jobs:
           cache-dependency-path: .github/workflows/*.yml
 
       - name: Changed workflow files (path-filter lint input)
-        if: inputs.workflow-path-filter-lint && github.event_name == 'pull_request'
+        if: (inputs.workflow-path-filter-lint || inputs.artifact-retention-lint) && github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           # HEAD = refs/pull/N/merge; HEAD^1 = base tip. Only files this PR adds/modifies/renames.
@@ -106,6 +113,105 @@ jobs:
                         "(e.g. the pull_request run is a required check)." % (path, trig))
                   bad += 1
           print("workflow path-filter lint: %d finding(s)" % bad)
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Artifact retention lint
+        if: inputs.artifact-retention-lint && github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          pip install -q "PyYAML>=6"
+          python - /tmp/wf-changed.txt <<'PY'
+          # Card t_eade26e1: 2026-10-16 the org hit its Actions artifact-storage quota. 2,900 prism-router
+          # junit/log artifacts sat on the 30-day default, and 7 approved PRs were blocked for 2.5 h.
+          # Every upload-artifact step names its own with.retention-days, 1..7. A longer one carries
+          # `# artifact-retention-ok: <why>` inside the step. Steps are read from the YAML node tree, so a
+          # flow-style step `- {uses: ..., with: {...}}` counts and text in a step name never does.
+          import re, sys, yaml
+          MAX_DAYS = 7
+          UPLOAD = re.compile(r"^actions/upload-artifact[@/]", re.I)  # GitHub resolves owner/repo case-insensitively
+          EXPR = "$" + "{{"  # never a literal opener here: GitHub parses every one in a workflow file
+          WAIVER = re.compile(r"#\s*artifact-retention-ok:(.*)$")
+
+          def scalar(node):
+              return node.value if isinstance(node, yaml.ScalarNode) else None
+
+          def steps(node):
+              # every mapping node whose `uses` is an upload-artifact action
+              if isinstance(node, yaml.MappingNode):
+                  keys = {scalar(k): v for k, v in node.value}
+                  if UPLOAD.match(scalar(keys.get("uses")) or ""):
+                      yield node, keys
+                  for _, v in node.value:
+                      yield from steps(v)
+              elif isinstance(node, yaml.SequenceNode):
+                  for v in node.value:
+                      yield from steps(v)
+
+          bad = 0
+          for path in [l.strip() for l in open(sys.argv[1]) if l.strip()]:
+              text = open(path).read()
+              lines = text.splitlines()
+              try:
+                  root = yaml.compose(text)
+              except yaml.YAMLError as e:
+                  print("::error file=%s::unparsable workflow (%s)" % (path, type(e).__name__)); bad += 1; continue
+              starts = [0]
+              for l in lines:
+                  starts.append(starts[-1] + len(l) + 1)
+
+              def scalars(node):
+                  if isinstance(node, yaml.ScalarNode):
+                      yield node.start_mark.index, node.end_mark.index
+                  elif isinstance(node, yaml.MappingNode):
+                      for k, v in node.value:
+                          yield from scalars(k)
+                          yield from scalars(v)
+                  elif isinstance(node, yaml.SequenceNode):
+                      for v in node.value:
+                          yield from scalars(v)
+
+              def lines_of(a, b):
+                  # (first, last) line index of the char span [a, b) using the per-line offsets in `starts`
+                  import bisect
+                  return bisect.bisect_right(starts, a) - 1, bisect.bisect_right(starts, max(a, b - 1)) - 1
+
+              for node, keys in steps(root) if root is not None else ():
+                  line = node.start_mark.line
+                  end = max(node.end_mark.line, line + 1)
+                  with_ = keys.get("with")
+                  val = None
+                  if isinstance(with_, yaml.MappingNode):
+                      val = next((scalar(v) for k, v in with_.value if scalar(k) == "retention-days"), None)
+                  why = None
+                  if val is None:
+                      why = "no with.retention-days (the default is the repo's 90 days)"
+                  elif val.strip().startswith(EXPR):
+                      why = None  # an expression: the caller decides, nothing to read here
+                  elif not val.strip().isdigit() or int(val) == 0:
+                      why = "retention-days %s is not 1..%d (0 means the repo default, 90 days)" % (val, MAX_DAYS)
+                  elif int(val) > MAX_DAYS:
+                      why = "retention-days %s > %d" % (val, MAX_DAYS)
+                  # a waiver is a COMMENT: a marker inside any scalar of the step (a name, a path) does not count
+                  spans = list(scalars(node))
+                  # the step's OWN lines only. PyYAML's end_mark for a block step is the NEXT step's first line, and
+                  # the blank/comment lines between two steps sit inside that range, so a waiver comment that opens
+                  # the next step would attach here (Prism 015758584b8c). The step ends at its last SCALAR line.
+                  last = max((lines_of(a, b)[1] for a, b in list(scalars(node))), default=line)
+                  waivers = [w.group(1).strip() for n in range(line, min(last + 1, len(lines)))
+                             for w in WAIVER.finditer(lines[n])
+                             if not any(a <= starts[n] + w.start() < b for a, b in spans)]
+                  if why and waivers and all(waivers):
+                      print("waived: %s:%d (%s)" % (path, line + 1, waivers[0]))
+                      continue
+                  if why and waivers:
+                      why += "; the `# artifact-retention-ok:` waiver needs a reason"
+                  if why:
+                      print("::error file=%s,line=%d::upload-artifact step: %s. Set retention-days: 2 for "
+                            "junit/logs/coverage, <= 7 for a dist another store also holds, or add "
+                            "`# artifact-retention-ok: <why>` in the step." % (path, line + 1, why))
+                      bad += 1
+          print("artifact retention lint: %d finding(s)" % bad)
           sys.exit(1 if bad else 0)
           PY
 
