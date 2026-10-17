@@ -171,6 +171,11 @@ jobs:
                       for v in node.value:
                           yield from scalars(v)
 
+              def lines_of(a, b):
+                  # (first, last) line index of the char span [a, b) using the per-line offsets in `starts`
+                  import bisect
+                  return bisect.bisect_right(starts, a) - 1, bisect.bisect_right(starts, max(a, b - 1)) - 1
+
               for node, keys in steps(root) if root is not None else ():
                   line = node.start_mark.line
                   end = max(node.end_mark.line, line + 1)
@@ -189,7 +194,11 @@ jobs:
                       why = "retention-days %s > %d" % (val, MAX_DAYS)
                   # a waiver is a COMMENT: a marker inside any scalar of the step (a name, a path) does not count
                   spans = list(scalars(node))
-                  waivers = [w.group(1).strip() for n in range(line, min(end + 1, len(lines)))
+                  # the step's OWN lines only. PyYAML's end_mark for a block step is the NEXT step's first line, and
+                  # the blank/comment lines between two steps sit inside that range, so a waiver comment that opens
+                  # the next step would attach here (Prism 015758584b8c). The step ends at its last SCALAR line.
+                  last = max((lines_of(a, b)[1] for a, b in list(scalars(node))), default=line)
+                  waivers = [w.group(1).strip() for n in range(line, min(last + 1, len(lines)))
                              for w in WAIVER.finditer(lines[n])
                              if not any(a <= starts[n] + w.start() < b for a, b in spans)]
                   if why and waivers and all(waivers):

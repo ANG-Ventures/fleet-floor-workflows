@@ -51,6 +51,13 @@ CASES = {
     "green_flow.yml": (HEAD + "      - uses: actions/upload-artifact@v4\n        with: {name: j, path: j.xml, retention-days: 1}\n", 0),
     "green_expr.yml": (HEAD + UP + "          retention-days: ${{ inputs.keep }}\n", 0),
     "green_waived.yml": (HEAD + UP + "          retention-days: 30  # artifact-retention-ok: cad.ace reads the newest green main run\n", 0),
+    # Prism 015758584b8c: a waiver that opens the NEXT step is that step's, not this one's: the 30-day upload stays red
+    # the second step is GREEN on its own (2 d), so the ONLY possible finding is the first step's 30 d: a lint that
+    # lets the comment waive the first step reports 0 and goes red here.
+    "red_next_steps_waiver_does_not_leak.yml": (HEAD + UP + "          retention-days: 30\n"
+                                                "      # artifact-retention-ok: this comment opens the step below\n"
+                                                "      - uses: actions/upload-artifact@v4\n        with:\n"
+                                                "          retention-days: 2\n", 1),
     "green_download_only.yml": (HEAD + "      - uses: actions/download-artifact@v4\n        with: {name: j}\n", 0),
     "green_no_steps.yml": ("on: [push]\njobs: {}\n", 0),
 }
