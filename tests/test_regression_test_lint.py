@@ -121,15 +121,32 @@ class Classification(unittest.TestCase):
                   "upstream parity merge 2026-10-17", "lease broke after restart", "Fixes #12"):
             self.assertTrue(self.fix(t), t)
 
+    def test_parity_merge_titles(self):
+        for t in ("parity: upstream sync 2026-10-01 (NousResearch 612d8e44 into fork)",
+                  "merge: parity sync with upstream (5,374 commits)", "sync: upstream parity merge 2026-07-23",
+                  "Merge upstream NousResearch/main into fork", "parity 2026-10-01 CI round-5 lane L6"):
+            self.assertTrue(self.fix(t), t)
+
     def test_non_fix_titles(self):
         for t in ("feat: add fixtures for router", "prefix all env vars", "docs: bug report template",
-                  "add restore drill to runbook", "chore: bump deps", "suffix handling"):
+                  "add restore drill to runbook", "chore: bump deps", "suffix handling",
+                  # replay false positive pcv#1006: "parity" names a feature, not a parity merge
+                  "Echo calls-server as a portable container: inventory, Containerfile + compose, parity/cutover scripts",
+                  "satellite_parity: LED row - dark ring is drift", "ci-runners image parity: probe imports",
+                  # replay false positives on hermes-home (each a name/adjective, not a fix verb)
+                  "continuity-regression §5b: gate on kanban wake-contract fork canary",
+                  "tcc-process-snapshot: 30 s -> fixed 600 s, no override",
+                  "cc-display: USB-C DDC after D6 05 is a transport property, not an mddc bug",
+                  "skills: land live-only edits of 7 #4003 skills on main, keep #4003's Prism fixes",
+                  "drain: live HEAD b17affb5c + origin/main, 13 conflicts + ups-commissioning restore"):
             self.assertFalse(self.fix(t), t)
 
     def test_branch_classifies(self):
         self.assertTrue(self.fix("lease reaper", "daedalus/t_1-fix-lease"))
         self.assertTrue(self.fix("lease reaper", "hotfix/lease"))
         self.assertFalse(self.fix("lease reaper", "daedalus/t_1-prefix-env"))
+        # replay false positive vh#4118: a runbook branch named after its subject
+        self.assertFalse(self.fix("fleet-cameras: Reolink Mac client runbook", "reolink-mac-client-repair"))
 
 
 class FileKinds(unittest.TestCase):
@@ -140,7 +157,8 @@ class FileKinds(unittest.TestCase):
         for p in ("tests/test_a.py", "server/tests/x.py", "scripts/tests/test_b.sh", "pkg/a_test.go",
                   "web/a.test.ts", "web/a.spec.js", "hooks/tests/fixtures/x.json", "selftest/run.sh",
                   "scripts/lint-selftest.sh", "tests/suites.json", ".github/ci/suites.json", "conftest.py",
-                  "scripts/test-wake.sh", "__tests__/a.js", "test/golden/out.txt"):
+                  "scripts/test-wake.sh", "__tests__/a.js", "test/golden/out.txt",
+                  "scripts/windows-display/golden-projection-test.ps1"):
             self.assertTrue(self.m.is_test(p), p)
         for p in ("scripts/lint.py", "router/lease.py", "fixture.py", "latest/a.py", "contest.py"):
             self.assertFalse(self.m.is_test(p), p)
@@ -161,6 +179,52 @@ class FileKinds(unittest.TestCase):
     def test_extensionless_executable_counts(self):
         rc, out, _ = run("fix: wrapper", [("bin/hermes-wrap", "modified", "@@ -1 +1 @@\n #!/bin/sh")])
         self.assertEqual(rc, 1, out)
+
+
+class Credits(unittest.TestCase):
+    """Test evidence that is not a test FILE (replay false positives on hermes-home)."""
+
+    def setUp(self):
+        self.m = mod()
+
+    def pr(self, files):
+        return {"title": "fix: x", "body": "", "branch": "b", "files": files}
+
+    def test_registering_a_test_in_ci_counts(self):  # vh#3135
+        v = self.m.verdict(self.pr([
+            {"path": "scripts/audit.py", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b\n"},
+            {"path": ".github/workflows/ci.yml", "status": "modified",
+             "patch": "@@ -5,0 +6,1 @@\n+          python -m pytest -q scripts/test_audit_fallback_chain_rot.py\n"}]))
+        self.assertEqual(v["result"], "pass", v)
+        self.assertIn("registers", v["reason"])
+
+    def test_glob_or_removed_line_is_not_registration(self):
+        v = self.m.verdict(self.pr([
+            {"path": "scripts/audit.py", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b\n"},
+            {"path": "scripts/lib/gate.json", "status": "modified",
+             "patch": "@@ -1,2 +1,3 @@\n-  \"tests/test_old.py\",\n+  \"tests/**\",\n+  \"scripts/tests/test_*.py\",\n"}]))
+        self.assertEqual(v["result"], "fail", v)
+
+    def test_rows_added_inside_selftests_table_count(self):  # vh#4963
+        head = "import re\n\nSELF_TESTS = [  # cases\n    (\"a\", 1),\n    (\"b\", 2),\n]\n\ndef run():\n    pass\n"
+        f = {"path": "scripts/lints/x_lint.py", "status": "modified", "head_text": head,
+             "patch": "@@ -3,3 +3,4 @@\n SELF_TESTS = [  # cases\n     (\"a\", 1),\n+    (\"b\", 2),\n ]\n"}
+        v = self.m.verdict(self.pr([f]))
+        self.assertEqual(v["result"], "pass", v)
+        self.assertIn("SELF_TESTS", v["reason"])
+
+    def test_edit_outside_selftests_table_does_not_count(self):
+        head = "import re\n\nSELF_TESTS = [\n    (\"a\", 1),\n]\n\ndef run():\n    return 2\n"
+        f = {"path": "scripts/lints/x_lint.py", "status": "modified", "head_text": head,
+             "patch": "@@ -7,2 +7,2 @@\n def run():\n-    return 1\n+    return 2\n"}
+        self.assertEqual(self.m.verdict(self.pr([f]))["result"], "fail")
+
+    def test_fetch_is_used_for_head_text(self):
+        seen = []
+        f = {"path": "a.py", "status": "modified", "patch": "@@ -2,0 +3,1 @@\n+    (\"c\", 3),\n"}
+        v = self.m.verdict(self.pr([f]), lambda p: seen.append(p) or "x = 1\nCASES_SELFTEST = [\n    1,\n]\n")
+        self.assertEqual(seen, ["a.py"])
+        self.assertEqual(v["result"], "pass", v)
 
 
 class Wiring(unittest.TestCase):
