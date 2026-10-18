@@ -254,6 +254,25 @@ shipped a blanket "workers never pin" refusal with neither).
   template listens to `edited`. Caller: [`templates/override-lint.yml`](templates/override-lint.yml).
   Contract + red/green cases: `tests/test_override_lint.py`.
 
+### Regression-test lint (`regression-test-lint.yml`, job `regression_test_lint`)
+
+Every bug fix ships a regression test (Ace 2026-10-18; rule text: coding-guardrails SKILL.md "Every bug
+fix ships a regression test"; card t_d1ac622f). A **fix PR that changes code but no test file fails**.
+
+- **Fix PR**: conventional `fix(...)`/`hotfix:`/`bug:` title, a fix word in the title (fix, hotfix, bug,
+  regress\*, broke(n), repair, restore), a parity / upstream-sync title, or a head-branch segment
+  `fix|hotfix|bugfix|bug|regress|repair|restore|parity`.
+- **Code**: a non-removed, non-test file with a code extension, or an extensionless file with a shebang
+  or under `bin/ scripts/ hooks/ tools/ cron/`. A PR changing only docs/config/data passes.
+- **Test**: any file under `tests/ test/ __tests__/ spec/ fixtures/ selftest/ e2e/ golden/` (any depth),
+  or named `test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `test-*.sh`, `conftest.py`, `*selftest*`,
+  `suites.json`.
+- **Exemption**: one PR body line `no-regression-test: <reason>` (reason >= 15 chars), echoed in the
+  job summary. Edit the body and re-run; the caller listens to `edited`.
+- Not judged here: test quality and the red-on-pre-fix proof (reviewer / ang-closeout row 1b).
+- Not a required check. Caller: [`templates/regression-test-lint.yml`](templates/regression-test-lint.yml)
+  (no `paths:`, the lint reads the PR as a whole). Contract + fixtures: `tests/test_regression_test_lint.py`.
+
 ## Self-test
 
 [`selftest.yml`](.github/workflows/selftest.yml) runs all five against the clean in-repo
