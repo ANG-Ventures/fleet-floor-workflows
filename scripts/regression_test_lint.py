@@ -143,28 +143,52 @@ def added_lines(patch):
     return out
 
 
-def registered_tests(files):
-    """Test files an ADDED line names (a CI step, suites.json row, classify glob): registering an existing
-    test so CI runs it is the fix (vh#3135 put test_audit_fallback_chain_rot.py into the lane). A glob
-    (`tests/**`, `tests/test_*.py`) yields no token with a file extension, so it names no test."""
-    found = []
+# Files where an added line naming a test REGISTERS it (CI workflow, suite manifest, task runner). A comment,
+# docstring or README line that mentions a test path is not a registration (Prism #35, t_23b5215f).
+REGISTRY_FILE = re.compile(r"(?:^|/)(?:\.github/(?:workflows|ci)/[^/]+|\.gitlab-ci\.ya?ml|\.circleci/[^/]+|suites\.json"
+                           r"|makefile|justfile|tox\.ini|pytest\.ini|noxfile\.py|package\.json|run-checks[^/]*)$", re.I)
+COMMENT_LINE = re.compile(r"^\s*(?:#|//|;|<!--)")
+MAX_REG_FETCH = 20
+
+
+def registered_tests(files, fetch=None):
+    """Test files an ADDED, non-comment line of a CI/registry file names (a CI step, suites.json row): registering
+    an existing test so CI runs it is the fix (vh#3135 put test_audit_fallback_chain_rot.py into the lane). The
+    named test must exist at head: a file the PR adds/keeps, or one fetch(path) can read. No fetch = no credit.
+    A glob (`tests/**`, `tests/test_*.py`) yields no token with a file extension, so it names no test."""
+    live = {f["path"] for f in files if f.get("status") != "removed"}
+    found, checked = [], 0
     for f in files:
+        if f.get("status") == "removed" or not REGISTRY_FILE.search(f["path"]):
+            continue
         for _, text in added_lines(f.get("patch")):
+            if COMMENT_LINE.match(text):
+                continue
             for tok in PATH_TOKEN.findall(text):
                 tok = tok.strip("./")
-                if "." in tok.rsplit("/", 1)[-1] and is_test(tok) and tok not in found:
-                    found.append(tok)
+                if "." not in tok.rsplit("/", 1)[-1] or not is_test(tok) or tok in found:
+                    continue
+                if tok not in live:
+                    if fetch is None or checked >= MAX_REG_FETCH:
+                        continue
+                    checked += 1
+                    if not fetch(tok):
+                        continue
+                found.append(tok)
     return found
 
 
 def inline_selftests(files, fetch):
     """Code files whose ADDED lines sit inside a top-level self-test/fixture table of the head file.
-    fetch(path) -> head file text or None (REST in CI; `head_text` on the fixture in tests)."""
+    fetch(path) -> head file text or None (REST in CI; `head_text` on the fixture in tests).
+    Scope: an added, non-comment line is credited when it is itself a table's opening line, or it is indented
+    and the nearest column-0 line above it opens the table. A column-0 closer (`]`, `)`, `}`) above it ends
+    the table, so a line after the table gets nothing (Prism #35, t_23b5215f)."""
     found = []
     for f in files:
         if not is_code(f) or f["status"] == "removed":
             continue
-        adds = [ln for ln, t in added_lines(f.get("patch")) if t.strip()]
+        adds = [ln for ln, t in added_lines(f.get("patch")) if t.strip() and not COMMENT_LINE.match(t)]
         if not adds:
             continue
         text = f.get("head_text")
@@ -174,14 +198,23 @@ def inline_selftests(files, fetch):
             continue
         lines = text.splitlines()
         for ln in adds:
-            for k in range(min(ln, len(lines)) - 1, -1, -1):
-                s = lines[k]
-                if s and not s[0].isspace() and not s.startswith(("#", "//", ")", "]", "}")):
-                    m = SELFTEST_OWNER.match(s)
-                    if m:
-                        found.append("%s:%d in %s" % (f["path"], ln, m.group(1)))
-                    break
-            if found and found[-1].startswith(f["path"] + ":"):
+            if not 1 <= ln <= len(lines):
+                continue
+            cur = lines[ln - 1]
+            if COMMENT_LINE.match(cur) or not cur.strip():
+                continue
+            owner = None
+            if not cur[0].isspace():
+                owner = cur
+            else:
+                for k in range(ln - 2, -1, -1):
+                    s = lines[k]
+                    if s and not s[0].isspace() and not COMMENT_LINE.match(s):
+                        owner = s
+                        break
+            m = SELFTEST_OWNER.match(owner) if owner and not owner.startswith((")", "]", "}")) else None
+            if m:
+                found.append("%s:%d in %s" % (f["path"], ln, m.group(1)))
                 break
     return found
 
@@ -193,15 +226,24 @@ def verdict(pr, fetch=None):
     files = [dict(f, status=norm_status(f.get("status"))) for f in pr.get("files") or []]
     live = [f for f in files if f["status"] != "removed"]
     code = [f["path"] for f in live if is_code(f)]
-    tests = [f["path"] for f in files if is_test(f["path"])]
+    # A removed test is not a test change: deleting the failing test must not satisfy the rule.
+    tests = [f["path"] for f in live if is_test(f["path"])]
     out = {"fix": is_fix, "why": why, "code": code, "tests": tests}
     if not is_fix:
         return dict(out, result="pass", reason=why)
+    # The PR-files endpoint stops at 3,000 files; a capped list cannot prove "no code" or "no test".
+    total = pr.get("changed_files")
+    if isinstance(total, int) and total > len(files):
+        state, reason = exemption(pr.get("body"))
+        if state == "ok":
+            return dict(out, exemption=reason, result="pass", reason="no-regression-test: " + reason)
+        return dict(out, result="fail", reason="PR file inventory incomplete: %d of %d changed files listed "
+                    "(REST cap 3000); cannot judge, add a no-regression-test line or split the PR" % (len(files), total))
     if not code:
         return dict(out, result="pass", reason="fix PR changes no code (docs/config/deletions only)")
     if tests:
         return dict(out, result="pass", reason="fix PR changes %d test file(s)" % len(tests))
-    reg = registered_tests(files)
+    reg = registered_tests(files, fetch)
     if reg:
         return dict(out, tests=reg, result="pass", reason="fix PR registers test(s) in CI: %s" % ", ".join(reg[:5]))
     inline = inline_selftests(files, fetch)
