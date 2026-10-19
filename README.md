@@ -34,6 +34,13 @@ jobs:
     with: { import-name: mypkg }
 ```
 
+**Lint floors: one caller, [`templates/floors.yml`](templates/floors.yml)** (t_8fc09421). It hosts
+`override_lint`, `regression_test_lint` and `ne_pair_floor` (plus `hosted_runner_lint` where adopted) as
+jobs of ONE workflow, so a PR push starts one run instead of three. Job ids are unchanged, so the check
+contexts (`override_lint / override_lint`, ...) are unchanged too; only the workflow file moves. On a PR
+body `edited` event only the two body-reading jobs run. Adopting it = add `floors.yml` and delete the
+separate `override-lint.yml` / `regression-test-lint.yml` / `ne-pair-floor.yml` callers in the same PR.
+
 Python CI keeps a **20-minute job timeout** by default, including dependency installation.
 Large suites can opt into a longer budget in their reviewed caller PR without changing
 other repositories or reducing test coverage:
