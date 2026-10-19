@@ -52,6 +52,13 @@ concurrency:
   group: floor-slop-${{ github.workflow }}-${{ inputs.concurrency-suffix }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Org-pool runners export GIT_ALTERNATE_OBJECT_DIRECTORIES (hermes-agent + hermes-home mirrors) to
+# every job; for any other repo the checkout then advertises ~100k foreign refs as `have`s and pays
+# 40-50 s before the pack arrives (t_403e823d / t_d1f1cac1). A reusable workflow does not inherit the
+# caller's workflow env, so it clears the alternates itself.
+env:
+  GIT_ALTERNATE_OBJECT_DIRECTORIES: ""
+
 jobs:
   slop_detect:
     name: slop_detect

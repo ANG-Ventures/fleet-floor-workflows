@@ -62,6 +62,13 @@ on:
 # (7 false operator wakes 10-03/04). Even cancel-in-progress: false cancels a replaced PENDING run.
 # The lint is ~20 s and reads the PR body over REST, so every run completes and the newest one counts.
 
+# Org-pool runners export GIT_ALTERNATE_OBJECT_DIRECTORIES (hermes-agent + hermes-home mirrors) to
+# every job; for any other repo the checkout then advertises ~100k foreign refs as `have`s and pays
+# 40-50 s before the pack arrives (t_403e823d / t_d1f1cac1). A reusable workflow does not inherit the
+# caller's workflow env, so it clears the alternates itself.
+env:
+  GIT_ALTERNATE_OBJECT_DIRECTORIES: ""
+
 jobs:
   override_lint:
     name: override_lint
