@@ -191,10 +191,13 @@ class Credits(unittest.TestCase):
         return {"title": "fix: x", "body": "", "branch": "b", "files": files}
 
     def test_registering_a_test_in_ci_counts(self):  # vh#3135
+        # the registered test already exists at head (registration needs it to exist; t_23b5215f)
+        head = {"scripts/test_audit_fallback_chain_rot.py": "def test_x():\n    pass\n"}
         v = self.m.verdict(self.pr([
             {"path": "scripts/audit.py", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b\n"},
             {"path": ".github/workflows/ci.yml", "status": "modified",
-             "patch": "@@ -5,0 +6,1 @@\n+          python -m pytest -q scripts/test_audit_fallback_chain_rot.py\n"}]))
+             "patch": "@@ -5,0 +6,1 @@\n+          python -m pytest -q scripts/test_audit_fallback_chain_rot.py\n"}]),
+            fetch=head.get)
         self.assertEqual(v["result"], "pass", v)
         self.assertIn("registers", v["reason"])
 
@@ -225,6 +228,106 @@ class Credits(unittest.TestCase):
         v = self.m.verdict(self.pr([f]), lambda p: seen.append(p) or "x = 1\nCASES_SELFTEST = [\n    1,\n]\n")
         self.assertEqual(seen, ["a.py"])
         self.assertEqual(v["result"], "pass", v)
+
+
+class PrismRound2(unittest.TestCase):
+    """Prism on #35 (t_23b5215f): every credit path must require evidence that a test still runs."""
+
+    def setUp(self):
+        self.m = mod()
+
+    def v(self, files, title="fix: correct lease", **kw):
+        return self.m.verdict(dict({"title": title, "body": "", "branch": "b", "files": files}, **kw))
+
+    def test_deleted_test_is_not_a_test_change(self):  # 6a41ba6a7713 / 877eb9e5b3e8 / 8c1900e4f037
+        v = self.v([{"path": "router/lease.py", "status": "modified"},
+                    {"path": "tests/test_lease.py", "status": "removed"}])
+        self.assertEqual(v["result"], "fail", v)
+        self.assertEqual(v["tests"], [])
+        rc, out, _ = run("fix: correct lease", ["router/lease.py", ("tests/test_lease.py", "removed")])
+        self.assertEqual(rc, 1, out)
+
+    def test_renamed_test_still_counts(self):
+        v = self.v([{"path": "router/lease.py", "status": "modified"},
+                    {"path": "tests/test_lease2.py", "status": "renamed"}])
+        self.assertEqual(v["result"], "pass", v)
+
+    def test_truncated_inventory_fails_fix_pr(self):  # c53da46cf0f2
+        files = [{"path": "docs/%04d.md" % i, "status": "modified"} for i in range(5)]
+        v = self.v(files, title="fix: repair calculation", changed_files=6)
+        self.assertEqual(v["result"], "fail", v)
+        self.assertIn("incomplete", v["reason"])
+        self.assertEqual(self.v(files, title="fix: x", changed_files=5)["result"], "pass")
+        self.assertEqual(self.v(files, title="feat: x", changed_files=6)["result"], "pass")
+
+    def test_truncated_inventory_is_red_in_the_step(self):
+        with tempfile.TemporaryDirectory() as dd:
+            jp = Path(dd) / "pr.json"
+            jp.write_text(json.dumps({"title": "fix: x", "body": "", "branch": "b", "changed_files": 3001,
+                                      "files": [{"path": "docs/a.md", "status": "modified"}]}))
+            script = step()["run"].replace("/tmp/regression-test-lint.json", str(jp))
+            r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                               env={k: x for k, x in os.environ.items() if k != "GITHUB_STEP_SUMMARY"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    def test_collect_step_carries_changed_files(self):
+        s = step("Collect PR files and body")["run"]
+        self.assertIn("changed_files", s)
+
+    def test_comment_mentioning_test_path_is_not_registration(self):  # d079ecdb8371 / b412e9029dee
+        for path, line in (("router/lease.py", "# see tests/test_lease.py"),
+                           ("README.md", "covered by https://x/tests/test_lease.py"),
+                           ("docs/notes.md", "tests/test_lease.py pins this"),
+                           (".github/workflows/ci.yml", "# covered by tests/test_lease.py")):
+            v = self.v([{"path": "router/lease.py", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b\n"},
+                        {"path": path, "status": "modified", "patch": "@@ -1,0 +1,1 @@\n+" + line + "\n"}])
+            self.assertEqual(v["result"], "fail", (path, v))
+
+    def test_registration_needs_the_test_to_exist_at_head(self):
+        files = [{"path": "router/lease.py", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b\n"},
+                 {"path": ".github/workflows/ci.yml", "status": "modified",
+                  "patch": "@@ -5,0 +6,1 @@\n+      run: pytest tests/test_ghost.py\n"}]
+        pr = {"title": "fix: x", "body": "", "branch": "b", "files": files}
+        self.assertEqual(self.m.verdict(pr, lambda p: None)["result"], "fail")
+        self.assertEqual(self.m.verdict(pr, lambda p: "def test_x(): pass\n")["result"], "pass")
+
+    def test_suites_json_registration_counts(self):
+        v = self.v([{"path": "router/lease.py", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b\n"},
+                    {"path": ".github/ci/suites.json", "status": "modified",
+                     "patch": "@@ -1,0 +2,1 @@\n+  \"tests/test_lease.py\",\n"}])
+        # suites.json is itself a test file, so it passes as a test-file change; registration is moot.
+        self.assertEqual(v["result"], "pass", v)
+
+    def test_comment_after_selftests_table_is_not_credit(self):  # f6d1ea95516b / f1074e383840
+        head = "SELF_TESTS = [\n    (\"a\", 1),\n]\n# parser behavior explained\ndef parse():\n    return 2\n"
+        f = {"path": "app.py", "status": "modified", "head_text": head,
+             "patch": "@@ -1,5 +1,6 @@\n SELF_TESTS = [\n     (\"a\", 1),\n ]\n+# parser behavior explained\n"
+                      " def parse():\n-    return 1\n+    return 2\n"}
+        self.assertEqual(self.v([f], title="fix: correct parser")["result"], "fail")
+
+    def test_prism_repro_single_line_table(self):  # f1074e383840 verbatim repro
+        v = self.m.verdict({"title": "fix: startup", "files": [{"path": "a.py", "patch":
+            "@@ -1,2 +1,3 @@\n SELF_TESTS = []\n+# startup fix\n-result = 1\n+result = 2\n",
+            "head_text": "SELF_TESTS = []\n# startup fix\nresult = 2\n"}]})
+        self.assertEqual(v["result"], "fail", v)
+
+    def test_indented_comment_inside_table_is_not_a_case(self):
+        head = "SELF_TESTS = [\n    (\"a\", 1),\n    # note\n]\nx = 2\n"
+        f = {"path": "app.py", "status": "modified", "head_text": head,
+             "patch": "@@ -2,2 +2,3 @@\n     (\"a\", 1),\n+    # note\n ]\n@@ -5 +5 @@\n-x = 1\n+x = 2\n"}
+        self.assertEqual(self.v([f])["result"], "fail")
+
+    def test_bash_array_rows_still_count(self):
+        head = "#!/bin/bash\ndeclare -a SELF_TESTS=(\n  \"a 1\"\n  \"b 2\"\n)\nrun() { :; }\n"
+        f = {"path": "scripts/x.sh", "status": "modified", "head_text": head,
+             "patch": "@@ -3,2 +3,3 @@\n   \"a 1\"\n+  \"b 2\"\n )\n"}
+        self.assertEqual(self.v([f])["result"], "pass")
+
+    def test_def_selftest_body_counts(self):
+        head = "def selftest():\n    assert f(1) == 2\n    assert f(2) == 3\n"
+        f = {"path": "a.py", "status": "modified", "head_text": head,
+             "patch": "@@ -2,1 +2,2 @@\n     assert f(1) == 2\n+    assert f(2) == 3\n"}
+        self.assertEqual(self.v([f])["result"], "pass")
 
 
 class Wiring(unittest.TestCase):
