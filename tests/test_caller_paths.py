@@ -14,7 +14,7 @@ from test_workflow_path_filter_lint import run_lint
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = sorted((ROOT / "templates").glob("*.yml"))
-NO_FILTER_AT_ALL = {"ne-pair-floor.yml", "override-lint.yml"}
+NO_FILTER_AT_ALL = {"ne-pair-floor.yml", "override-lint.yml", "floors.yml"}
 
 
 def triggers(path):

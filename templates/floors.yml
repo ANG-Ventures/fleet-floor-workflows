@@ -1,0 +1,69 @@
+# Fleet floors -- ONE caller per repo for the lint floors (t_8fc09421). Replaces the separate
+# override-lint.yml, regression-test-lint.yml and ne-pair-floor.yml callers: one workflow run per PR
+# event instead of three. Copy to .github/workflows/floors.yml and delete those three callers in the
+# SAME PR. Pin every `uses:` to an IMMUTABLE 40-hex commit SHA of ANG-Ventures/fleet-floor-workflows.
+#
+# Check names do NOT change: a reusable call reports `<caller-job> / <reusable-job>`, and the caller
+# job ids below are the ones the separate callers used (`override_lint / override_lint`,
+# `regression_test_lint / regression_test_lint`, `ne_pair_floor / ne_pair_floor`). Only the workflow
+# FILE changes, so move any per-file config (ci-job-budgets keyed by workflow path) to floors.yml.
+#
+# Events:
+#   - override_lint + regression_test_lint read the PR body (`Override:` / `no-regression-test:`
+#     lines), so they run on `edited` too. Neither runs on push (their steps are PR-only).
+#   - ne_pair_floor scans the tree, which a body edit cannot change: it skips `edited`, and runs on
+#     push:main as the backstop. A body edit costs one run with two jobs, not three runs.
+#
+# Placeholders:
+#   __FLOOR_SHA__   40-char commit SHA of the central repo
+#   __RUNNER__      private ANG-Ventures repo: ${{ vars.CI_RUNNER || 'hermes-ci' }} (x64 only).
+#                   Public or Kyzcreig repo: ubuntu-latest.
+name: floors
+
+# path-filter-exempt: whole-tree-scan t_8fc09421 no `paths:` on purpose (README "Caller path filters"): GitHub
+# drops a filtered workflow on a >3,000-file diff whose matches sort late; each floor filters files itself.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# A new head cancels the superseded head's run. `edited`/`reopened` (same head as a live run) and every
+# push:main run get their own group, so a same-head twin is never cancelled (t_69ee9353) and the main
+# backstop is never starved (fleet R18).
+concurrency:
+  group: floors-${{ (github.event.action == 'opened' || github.event.action == 'synchronize') && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  override_lint:
+    if: github.event_name == 'pull_request'
+    uses: ANG-Ventures/fleet-floor-workflows/.github/workflows/override-lint.yml@__FLOOR_SHA__
+    with:
+      runner: __RUNNER__
+      # docs-paths: "skills-shared skills"
+      # allowlist: |
+      #   line:my refusal text reviewed in PR #N
+
+  regression_test_lint:
+    if: github.event_name == 'pull_request'
+    uses: ANG-Ventures/fleet-floor-workflows/.github/workflows/regression-test-lint.yml@__FLOOR_SHA__
+    with:
+      runner: __RUNNER__
+
+  ne_pair_floor:
+    if: github.event.action != 'edited'
+    uses: ANG-Ventures/fleet-floor-workflows/.github/workflows/ne-pair-floor.yml@__FLOOR_SHA__
+    with:
+      runner: __RUNNER__
+
+  # Private repos that adopted hosted-runner-lint: uncomment (and delete hosted-runner-lint.yml).
+  # hosted_runner_lint:
+  #   if: github.event.action != 'edited'
+  #   uses: ANG-Ventures/fleet-floor-workflows/.github/workflows/hosted-runner-lint.yml@__FLOOR_SHA__
+  #   with:
+  #     runner: __RUNNER__
