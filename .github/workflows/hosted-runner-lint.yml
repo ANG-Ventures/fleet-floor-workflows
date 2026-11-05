@@ -17,9 +17,9 @@ on:
   workflow_call:
     inputs:
       runner:
-        description: "Runner label. Private ANG-Ventures repos pass hermes-ci (the lint fails a hosted default)."
+        description: "Runner label. Private ANG-Ventures repos pass universal-ci (the lint fails a hosted default)."
         type: string
-        # hosted-ok: a PUBLIC caller may run this floor on free hosted minutes; private callers pass hermes-ci
+        # hosted-ok: a PUBLIC caller may run this floor on free hosted minutes; private callers pass universal-ci
         default: "ubuntu-latest"
       concurrency-suffix:
         description: "Disambiguator when one workflow calls this reusable workflow more than once."
