@@ -46,6 +46,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Collect PR files and body
+        id: collect
         if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,9 +64,30 @@ jobs:
             jq -n --arg t "$EVENT_TITLE" --arg b "$EVENT_BODY" --arg n "$EVENT_CHANGED" \
               '{title:$t, body:$b, changed_files:($n|tonumber? // null)}' > /tmp/rtl-pr.json
           fi
-          gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
+          # An installation REST rate limit (HTTP 403/429 "API rate limit exceeded") is no PR's red (t_688d02cb):
+          # wait for the reset and retry, inside a budget the 10-min job timeout covers. If it is still refused,
+          # nothing was read: one ::warning::, COULD-NOT-GRADE in the summary, graded=false skips the lint. Any
+          # other gh failure stays red.
+          budget="${RTL_WAIT_BUDGET:-360}" waited=0
+          until gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
             --jq '.[] | {path: .filename, status: .status, patch: (.patch // ""), patch_head: ((.patch // "")[:400])}' \
-            > /tmp/rtl-files.jsonl
+            > /tmp/rtl-files.jsonl 2> /tmp/rtl-gh.err; do
+            cat /tmp/rtl-gh.err >&2
+            grep -qi 'rate limit' /tmp/rtl-gh.err || exit 1
+            reset=$(gh api rate_limit --jq .resources.core.reset 2>/dev/null || echo 0)
+            wait=$(( reset - $(date +%s) + 2 ))
+            if [ "$wait" -lt 5 ]; then wait=60; fi  # reset unknown or past (secondary limit): one minute
+            if [ $(( waited + wait )) -gt "$budget" ]; then
+              echo "::warning::regression-test-lint COULD-NOT-GRADE: GitHub REST rate limit for this installation still exceeded after ${waited}s (budget ${budget}s); the PR was not read"
+              printf '### regression-test-lint: **COULD-NOT-GRADE**\n\n- GitHub REST rate limit (installation) still exceeded after %ss; PR files not read, no verdict\n' "$waited" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              echo "graded=false" >> "${GITHUB_OUTPUT:-/dev/null}"
+              exit 0
+            fi
+            echo "::notice::REST rate limit; waiting ${wait}s for the reset"
+            sleep "$wait"
+            waited=$(( waited + wait ))
+          done
+          echo "graded=true" >> "${GITHUB_OUTPUT:-/dev/null}"
           jq -s --slurpfile pr /tmp/rtl-pr.json --arg br "$HEAD_REF" \
             '{title: ($pr[0].title // ""), body: ($pr[0].body // ""), branch: $br, changed_files: $pr[0].changed_files, files: .}' \
             /tmp/rtl-files.jsonl > /tmp/regression-test-lint.json
@@ -73,7 +95,7 @@ jobs:
           echo "files: $(wc -l < /tmp/rtl-files.jsonl) of $(jq -r '.changed_files // "?"' /tmp/rtl-pr.json)"
 
       - name: Regression test lint
-        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+        if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && steps.collect.outputs.graded == 'true'
         env:
           # Head-file reads (only for an in-file SELF_TESTS check on a fix PR that would otherwise fail).
           GH_TOKEN: ${{ github.token }}

@@ -330,6 +330,99 @@ class PrismRound2(unittest.TestCase):
         self.assertEqual(self.v([f])["result"], "pass")
 
 
+COLLECT = "Collect PR files and body"
+# Fake gh: `api rate_limit` prints a reset 30 s out; every other call fails with GitHub's installation rate-limit
+# text for the first FAKE_403 calls (-1 = forever), then answers. Fake sleep records its argument and returns.
+FAKE_GH = r'''#!/usr/bin/env python3
+import json, os, sys, time
+a = sys.argv[1:]
+if "rate_limit" in a:
+    print(int(time.time()) + 30); sys.exit(0)
+n_file = os.environ["FAKE_STATE"]
+n = int(open(n_file).read()) if os.path.exists(n_file) else 0
+open(n_file, "w").write(str(n + 1))
+lim = int(os.environ["FAKE_403"])
+if lim < 0 or n < lim:
+    sys.stderr.write("gh: API rate limit exceeded for installation. If you reach out to GitHub Support for help, "
+                     "please include the request ID X (HTTP 403)\n"); sys.exit(1)
+if any(x.endswith("/files?per_page=100") for x in a):
+    print(json.dumps({"path": "router/lease.py", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b\n",
+                      "patch_head": ""}))
+else:
+    print(json.dumps({"title": "fix: lease", "body": "", "changed_files": 1}))
+'''
+
+
+def collect(n403, budget=None, fake=FAKE_GH):
+    """Run the EXACT collect step with the fake gh; then the lint step when the collect says it graded.
+    -> (collect rc, lint rc or None, output, summary, sleeps, step outputs)"""
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "bin").mkdir()
+        (d / "bin/gh").write_text(fake)
+        (d / "bin/sleep").write_text('#!/bin/sh\necho "$1" >> "%s"\n' % (d / "sleeps"))
+        for f in ("gh", "sleep"):
+            (d / "bin" / f).chmod(0o755)
+        env = dict(os.environ, PATH="%s:%s" % (d / "bin", os.environ["PATH"]), FAKE_STATE=str(d / "n"),
+                   FAKE_403=str(n403), REPO="o/r", PR_NUMBER="1", EVENT_TITLE="fix: lease", EVENT_BODY="",
+                   EVENT_CHANGED="1", HEAD_REF="b", GITHUB_STEP_SUMMARY=str(d / "summary.md"),
+                   GITHUB_OUTPUT=str(d / "out"))
+        if budget is not None:
+            env["RTL_WAIT_BUDGET"] = str(budget)
+        r = subprocess.run(["bash", "-c", step(COLLECT)["run"].replace("/tmp/", str(d) + "/")],
+                           capture_output=True, text=True, env=env)
+        out = r.stdout + r.stderr
+        outputs = (d / "out").read_text() if (d / "out").exists() else ""
+        lint_rc = None
+        if r.returncode == 0 and "graded=false" not in outputs:
+            lr = subprocess.run(["bash", "-c", step()["run"].replace("/tmp/regression-test-lint.json",
+                                                                     str(d / "regression-test-lint.json"))],
+                                capture_output=True, text=True, env=dict(env, GH_TOKEN=""))
+            lint_rc, out = lr.returncode, out + lr.stdout + lr.stderr
+        summary = (d / "summary.md").read_text() if (d / "summary.md").exists() else ""
+        sleeps = (d / "sleeps").read_text().split() if (d / "sleeps").exists() else []
+    return r.returncode, lint_rc, out, summary, sleeps, outputs
+
+
+class RateLimit(unittest.TestCase):
+    """t_688d02cb: an installation rate limit (HTTP 403) on the PR file read is not a red the PR caused."""
+
+    def test_403_then_200_waits_for_the_reset_and_grades(self):
+        rc, lint_rc, out, summary, sleeps, _ = collect(2)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(sleeps, out)  # it waited instead of dying
+        self.assertTrue(all(25 <= int(s) <= 40 for s in sleeps), sleeps)  # the wait is the reset header, not a guess
+        # The lint then READ the PR: a fix with code and no test is still red.
+        self.assertEqual(lint_rc, 1, out)
+        self.assertIn("FAIL", summary)
+
+    def test_403_forever_is_could_not_grade_not_green_not_red(self):
+        rc, lint_rc, out, summary, sleeps, outputs = collect(-1, budget=100)
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(lint_rc)  # the lint never ran, so it passed nothing
+        self.assertIn("graded=false", outputs)
+        self.assertEqual(len(re.findall(r"^::warning::.*rate limit", out, re.M | re.I)), 1, out)
+        self.assertIn("COULD-NOT-GRADE", summary)
+        self.assertNotIn("PASS", summary)
+        self.assertLessEqual(sum(int(s) for s in sleeps), 100)
+
+    def test_other_api_failure_stays_red(self):
+        fake = FAKE_GH.replace("API rate limit exceeded for installation", "Resource not accessible by integration")
+        rc, _, out, _, sleeps, _ = collect(-1, fake=fake)
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(sleeps, [])
+
+    def test_lint_step_skips_when_not_graded(self):
+        self.assertIn("steps.collect.outputs.graded", step()["if"])
+        self.assertEqual(step(COLLECT)["id"], "collect")
+
+    def test_wait_budget_fits_the_job_timeout(self):
+        job = load()["jobs"]["regression_test_lint"]
+        m = re.search(r"RTL_WAIT_BUDGET:-(\d+)", step(COLLECT)["run"])
+        self.assertTrue(m)
+        self.assertLess(int(m.group(1)) + 120, int(job["timeout-minutes"]) * 60)
+
+
 class Wiring(unittest.TestCase):
     def test_script_is_the_embedded_step(self):
         m = re.search(r"<<'PY'\n(.*?)\nPY\n", step()["run"], re.S)
