@@ -1,0 +1,65 @@
+# select-tests caller — run only the pytest files a PR can reach (t_4c317916). Copy the `select` job into the
+# repo's test workflow and make the test job read its outputs. Pin `uses:` to an IMMUTABLE 40-hex commit SHA of
+# ANG-Ventures/fleet-floor-workflows (never a moving tag): that pin is what stops a PR from changing the selector.
+#
+# Switch: repo variable CI_PR_SELECTION. `off` = the full suite on every PR, as before (no deploy, no PR):
+#   gh variable set CI_PR_SELECTION --body off -R <owner>/<repo>
+# Unset = selection on. push / merge_group / schedule always run the full suite.
+#
+# Onboard a repo only where the 14-day replay (scripts/select_tests_replay.py) shows PR wall time dropping at
+# BOTH p50 and p90 with this job in front (Ace 2026-11-14, msg 1571411494955122759).
+#
+# Placeholders:
+#   __FLOOR_SHA__   40-char commit SHA of the central repo
+#   __RUNNER__      the repo's runner expression, e.g. ${{ vars.CI_RUNNER || 'universal-ci' }}
+#   __LEGS__        the matrix width the full suite uses today; __PER_LEG__ selected files per leg
+name: tests
+
+# path-filter-exempt: pull_request is the PR test gate; a path-filtered check sits pending on a PR that skips it. push:main is filtered.
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  select:
+    uses: ANG-Ventures/fleet-floor-workflows/.github/workflows/select-tests.yml@__FLOOR_SHA__
+    with:
+      runner: __RUNNER__
+      selection: ${{ vars.CI_PR_SELECTION }}
+      tests-path: tests
+      max-legs: __LEGS__
+      files-per-leg: __PER_LEG__
+
+  test:
+    needs: select
+    if: ${{ needs.select.outputs.count != '0' }}
+    runs-on: __RUNNER__
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: ${{ fromJSON(needs.select.outputs.legs) }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: pytest
+        env:
+          MODE: ${{ needs.select.outputs.mode }}
+          TESTS: ${{ needs.select.outputs.tests }}
+          LEG: ${{ matrix.leg }}
+          LEGS: ${{ strategy.job-total }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = full ]; then
+            mapfile -t FILES < <(find tests -name 'test_*.py' -o -name '*_test.py' | sort)
+          else
+            mapfile -t FILES < <(python3 -c 'import json,os;print("\n".join(json.loads(os.environ["TESTS"])))')
+          fi
+          # round-robin this leg's share
+          mapfile -t MINE < <(printf '%s\n' "${FILES[@]}" | awk -v k="$LEG" -v n="$LEGS" '(NR-1)%n==k-1')
+          echo "leg $LEG/$LEGS ($MODE): ${#MINE[@]} test files"; printf '  %s\n' "${MINE[@]}"
+          python -m pytest -q "${MINE[@]}"

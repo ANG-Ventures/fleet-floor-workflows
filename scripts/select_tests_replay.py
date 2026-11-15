@@ -99,6 +99,7 @@ def main(argv=None):
     ap.add_argument("--durations", help="JSON {test file: seconds} at the repo root")
     ap.add_argument("--tests-path", action="append")
     ap.add_argument("--alias", action="append", default=[])
+    ap.add_argument("--source-root", action="append", default=[])
     ap.add_argument("--max-legs", type=int, default=1)
     ap.add_argument("--files-per-leg", type=int, default=0)
     ap.add_argument("--out", required=True)
@@ -187,7 +188,7 @@ def main(argv=None):
                 git(wt, "checkout", "-q", "--detach", "-f", sha)
             t0 = time.time()
             graphs = {}
-            sel, summ = select_tests.select(wt, changed, deleted, mb, tests_paths, (), aliases, graphs)
+            sel, summ = select_tests.select(wt, changed, deleted, mb, tests_paths, a.source_root, aliases, graphs)
             sel_secs = time.time() - t0
             full = graphs["head"].tests
             sel_cache[sha] = (sel, summ, full, sel_secs, changed, deleted)

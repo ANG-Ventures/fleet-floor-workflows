@@ -55,6 +55,16 @@ jobs:
       shards: 2
       concurrency-suffix: py-shards
 
+  # select-tests (t_4c317916): the reusable selector runs green on the sample package; on a PR it selects from the
+  # merge-parent diff, on push it reports the full suite. The selection contract is tests/test_select_tests.py.
+  select_tests:
+    uses: ./.github/workflows/select-tests.yml
+    with:
+      working-directory: sample
+      tests-path: tests
+      max-legs: 2
+      files-per-leg: 1
+
   timeout_contract:
     runs-on: ubuntu-latest
     timeout-minutes: 5
