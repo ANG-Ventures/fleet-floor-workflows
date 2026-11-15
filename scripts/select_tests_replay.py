@@ -212,7 +212,12 @@ def main(argv=None):
         L = a.max_legs if a.files_per_leg <= 0 else max(1, min(a.max_legs, math.ceil(nsel / a.files_per_leg)))
         total_pytest = sum(l["pytest"] for l in legs)
         leg_pytest = total_pytest * frac / L
-        by_end = sorted(legs, key=lambda l: l["queue"] + l["setup"] + l["post"], reverse=True)[:L]
+        # Each kept leg keeps its own measured queue/setup/post and its own pytest time, scaled by the selected
+        # duration share and by legs-before/legs-after; the slowest real legs are the ones kept. With the full
+        # suite on the same leg count this reproduces the real run, so the comparison carries no balance artifact.
+        L = min(L, len(legs))
+        by_end = sorted(legs, key=lambda l: l["queue"] + l["setup"] + l["pytest"] + l["post"], reverse=True)[:L]
+        scale = frac * len(legs) / L
         checkout = statistics.median(l["checkout"] for l in legs)
         select_job = fanin_lat + checkout + sel_secs
         lead = select_job
@@ -220,11 +225,11 @@ def main(argv=None):
             pj = [j for j in jobs if j["name"] == a.parallel_job and j.get("completed_at")]
             if pj:
                 lead = max(0.0, select_job - (ts(pj[0]["completed_at"]) - created))
-        model_wall = lead + max(l["queue"] + l["setup"] + leg_pytest + l["post"] for l in by_end) + fanin_lat
+        model_wall = lead + max(l["queue"] + l["setup"] + l["pytest"] * scale + l["post"] for l in by_end) + fanin_lat
         if others_end:  # jobs selection does not shorten still bound the wall
             model_wall = max(model_wall, max(others_end) - created + fanin_lat)
         actual_min = sum(l["dur"] for l in legs) / 60
-        model_min = (select_job + sum(l["setup"] + l["post"] + leg_pytest for l in by_end)) / 60
+        model_min = (select_job + sum(l["setup"] + l["post"] + l["pytest"] * scale for l in by_end)) / 60
         failing, missed = [], []
         if any(l["failed"] for l in legs):
             for l in legs:
@@ -270,8 +275,20 @@ def main(argv=None):
         pct([x["selected"] for x in rows], 0.9), statistics.median(x["total"] for x in rows), full_rows,
         100 * statistics.median(x["weight_frac"] for x in rows), am, mm, 100 * (mm - am) / am,
         pct(aw, .5) / 60, pct(mw, .5) / 60, pct(aw, .9) / 60, pct(mw, .9) / 60, len(red), len(missed)))
+    # a test file red on 3+ different PRs is red for a reason outside any one PR (main red or a flake)
+    prs_by_file = {}
+    for x in red:
+        for f in x["failing"]:
+            prs_by_file.setdefault(f, set()).add(x["pr"])
+    recurring = {f for f, ps in prs_by_file.items() if len(ps) >= 3}
+    own = [x for x in missed if set(x["missed"]) - recurring]
+    print("")
+    print("Red runs whose failing file the selection skips: %d; of those, with a skipped file red on fewer than 3 PRs "
+          "(possibly PR-caused): %d. Recurring red files (3+ PRs): %s" % (len(missed), len(own), sorted(recurring)))
     for x in missed:
-        print("  missed: run %d PR #%d failing %s, not selected %s" % (x["run"], x["pr"], x["failing"], x["missed"]))
+        print("  missed: run %d PR #%d failing %s, not selected %s%s" % (
+            x["run"], x["pr"], x["failing"], x["missed"],
+            "" if set(x["missed"]) - recurring else " (recurring)"))
     return 0
 
 
