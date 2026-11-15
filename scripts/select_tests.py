@@ -144,6 +144,48 @@ def _module_scope(stmts):
             yield st
 
 
+_EXTRACT_CACHE = {}
+
+
+def _import_records(nodes) -> list:
+    """(module, level, names) per import; names None for `import a.b` and import_module("a.b")."""
+    out = []
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            out += [(a.name, 0, None) for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            out.append((node.module or "", node.level or 0, [a.name for a in node.names if a.name != "*"]))
+        elif isinstance(node, ast.Call) and getattr(node.func, "attr", getattr(node.func, "id", "")) in (
+                "import_module", "__import__") and node.args and isinstance(node.args[0], ast.Constant) \
+                and isinstance(node.args[0].value, str):
+            out.append((node.args[0].value, 0, None))
+    return out
+
+
+def _extract(p: str, text: str, lazy_imports: str):
+    """[(node id, fixture meta or None, import records)] for one file, or None when it does not parse."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text, filename=p)
+    except (SyntaxError, ValueError):
+        return None
+    if os.path.basename(p) == "conftest.py":
+        recs = []
+        for stmt in tree.body:
+            fx = _fixture(stmt)
+            if fx is None:
+                recs.append((p, None, _import_records(ast.walk(stmt))))
+            else:  # a fixture: its body's imports reach only the tests that use it
+                recs.append(("%s::%s" % (p, stmt.name), (fx, [a.arg for a in stmt.args.args]),
+                             _import_records(ast.walk(stmt))))
+        return recs
+    if lazy_imports == "follow" or is_test_file(p):
+        return [(p, None, _import_records(ast.walk(tree)))]
+    # a non-test module: the imports that run when it is imported
+    return [(p, None, _import_records(n for st in _module_scope(tree.body) for n in ast.walk(st)))]
+
+
 SCANNER_RE = re.compile(r"\.rglob\(|os\.walk\(|ls-files|glob\([^)\n]*\*\*")
 
 
@@ -254,52 +296,38 @@ class Graph:
         text = self.tree.read(p)
         if text is None:
             return
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                tree = ast.parse(text, filename=p)
-        except (SyntaxError, ValueError):
+        key = (p, self.lazy_imports, hash(text))
+        if key not in _EXTRACT_CACHE:
+            _EXTRACT_CACHE[key] = _extract(p, text, self.lazy_imports)
+        recs = _EXTRACT_CACHE[key]
+        if recs is None:
             self.parse_errors.append(p)
             return
-        if os.path.basename(p) == "conftest.py":
-            for stmt in tree.body:
-                fx = _fixture(stmt)
-                if fx is None:
-                    self._add_imports(p, p, ast.walk(stmt))
-                else:
-                    node = "%s::%s" % (p, stmt.name)  # a fixture: its body's imports reach only its users
-                    self.fixtures[p][stmt.name] = (fx, [a.arg for a in stmt.args.args])
-                    self._add_imports(p, node, ast.walk(stmt))
-        elif self.lazy_imports == "follow" or is_test_file(p):
-            self._add_imports(p, p, ast.walk(tree))
-        else:  # a non-test module: the imports that run when it is imported
-            self._add_imports(p, p, (n for st in _module_scope(tree.body) for n in ast.walk(st)))
+        for node_id, fixture, imports in recs:
+            if fixture is not None:
+                self.fixtures[p][node_id.split("::", 1)[1]] = fixture
+            self._add_imports(p, node_id, imports)
 
-    def _add_imports(self, p: str, node_id: str, nodes) -> None:
+    def _add_imports(self, p: str, node_id: str, imports) -> None:
         pkg = None
-        for node in nodes:
-            targets = []
-            if isinstance(node, ast.Import):
-                targets = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                base = node.module or ""
-                if node.level:
-                    if pkg is None:
-                        pkg = self._package_of(p) or ""
-                    up = pkg.split(".") if pkg else []
-                    up = up[:len(up) - (node.level - 1)] if node.level > 1 else up
-                    base = ".".join([x for x in up + ([node.module] if node.module else []) if x])
-                targets = [base] if base else []
-                targets += [(base + "." + a.name) if base else a.name for a in node.names if a.name != "*"]
-            elif isinstance(node, ast.Call) and getattr(node.func, "attr", getattr(node.func, "id", "")) in (
-                    "import_module", "__import__") and node.args and isinstance(node.args[0], ast.Constant) \
-                    and isinstance(node.args[0].value, str):
-                targets = [node.args[0].value]
+        for module, level, names in imports:
+            if level:
+                if pkg is None:
+                    pkg = self._package_of(p) or ""
+                up = pkg.split(".") if pkg else []
+                up = up[:len(up) - (level - 1)] if level > 1 else up
+                base = ".".join([x for x in up + ([module] if module else []) if x])
+            else:
+                base = module
+            if names is None:  # `import a.b` / import_module("a.b")
+                targets = [base]
+            else:
+                targets = ([base] if base else []) + [(base + "." + n) if base else n for n in names]
             for t in targets:
                 hit = self._resolve(p, t)
                 if hit:
                     self.edges[node_id] |= hit
-                elif not (isinstance(node, ast.ImportFrom) and node.level):
+                elif not level:
                     self.third_party[node_id].add(t.split(".")[0].lower())
 
     def dependents(self, seeds) -> set:

@@ -37,7 +37,7 @@ def ts(s):
 
 
 def gh(path, paginate=False, raw=False):
-    cmd = ["gh", "api", path] + (["--paginate"] if paginate else [])
+    cmd = ["gh", "api", path] + (["--paginate"] if paginate else []) + (["--allow-escape-sequences"] if raw else [])
     for i in range(4):
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode == 0:
@@ -82,7 +82,7 @@ def pct(xs, q):
     return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
 
 
-FAIL_RE = re.compile(r"(?:FAILED|ERROR)\s+([\w./-]+\.py)(?:::|\s|$)")
+FAIL_RE = re.compile(r"(?:FAILED|ERROR|FAIL)\s+([\w./-]+\.py)(?:::|\s|$)")
 
 
 def main(argv=None):
@@ -95,6 +95,8 @@ def main(argv=None):
     ap.add_argument("--pytest-step-re", default=r"pytest")
     ap.add_argument("--checkout-step-re", default=r"^Checkout")
     ap.add_argument("--other-job-re", help="regex for test jobs selection does not change; their end bounds the wall")
+    ap.add_argument("--parallel-job", help="a job the legs already wait on (a classifier/plan job); select runs "
+                    "beside it, so it adds only what it outlasts that job by")
     ap.add_argument("--fanin-job", required=True, help="the job that reports the suite result")
     ap.add_argument("--durations", help="JSON {test file: seconds} at the repo root")
     ap.add_argument("--tests-path", action="append")
@@ -213,7 +215,12 @@ def main(argv=None):
         by_end = sorted(legs, key=lambda l: l["queue"] + l["setup"] + l["post"], reverse=True)[:L]
         checkout = statistics.median(l["checkout"] for l in legs)
         select_job = fanin_lat + checkout + sel_secs
-        model_wall = select_job + max(l["queue"] + l["setup"] + leg_pytest + l["post"] for l in by_end) + fanin_lat
+        lead = select_job
+        if a.parallel_job:
+            pj = [j for j in jobs if j["name"] == a.parallel_job and j.get("completed_at")]
+            if pj:
+                lead = max(0.0, select_job - (ts(pj[0]["completed_at"]) - created))
+        model_wall = lead + max(l["queue"] + l["setup"] + leg_pytest + l["post"] for l in by_end) + fanin_lat
         if others_end:  # jobs selection does not shorten still bound the wall
             model_wall = max(model_wall, max(others_end) - created + fanin_lat)
         actual_min = sum(l["dur"] for l in legs) / 60
@@ -224,15 +231,15 @@ def main(argv=None):
                 if not l["failed"]:
                     continue
                 log = os.path.join(a.out, "logs", "%d.txt" % l["id"])
-                if not os.path.exists(log):
+                if not os.path.exists(log) or os.path.getsize(log) == 0:
                     try:
                         text = gh("repos/%s/actions/jobs/%d/logs" % (a.repo, l["id"]), raw=True)
                     except RuntimeError:
                         text = ""
                     with open(log, "w") as fh:
                         fh.write(text)
-                with open(log) as fh:
-                    failing += FAIL_RE.findall(fh.read())
+                with open(log, errors="replace") as fh:
+                    failing += FAIL_RE.findall(re.sub(r"\x1b\[[0-9;]*m", "", fh.read()))
             failing = sorted(set(failing))
             missed = [f for f in failing if f not in set(sel)]
         rows.append({"run": r["id"], "pr": (set(r["prs"]) & merged).pop(), "sha": sha[:10],
