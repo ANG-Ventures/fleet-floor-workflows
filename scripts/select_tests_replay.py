@@ -94,6 +94,7 @@ def main(argv=None):
     ap.add_argument("--shard-job-re", required=True, help="regex for the test leg job names")
     ap.add_argument("--pytest-step-re", default=r"pytest")
     ap.add_argument("--checkout-step-re", default=r"^Checkout")
+    ap.add_argument("--other-job-re", help="regex for test jobs selection does not change; their end bounds the wall")
     ap.add_argument("--fanin-job", required=True, help="the job that reports the suite result")
     ap.add_argument("--durations", help="JSON {test file: seconds} at the repo root")
     ap.add_argument("--tests-path", action="append")
@@ -180,11 +181,15 @@ def main(argv=None):
                 continue
             changed = git(a.clone, "diff", "--no-renames", "--name-only", "--diff-filter=d", mb, sha).split()
             deleted = git(a.clone, "diff", "--no-renames", "--name-only", "--diff-filter=D", mb, sha).split()
-            git(a.clone, "-C", wt, "checkout", "-q", "--detach", "-f", sha)
+            if subprocess.run(["git", "-C", wt, "checkout", "-q", "--detach", "-f", sha],
+                              capture_output=True).returncode != 0:
+                git(wt, "clean", "-fdqx")
+                git(wt, "checkout", "-q", "--detach", "-f", sha)
             t0 = time.time()
-            sel, summ = select_tests.select(wt, changed, deleted, mb, tests_paths, (), aliases)
+            graphs = {}
+            sel, summ = select_tests.select(wt, changed, deleted, mb, tests_paths, (), aliases, graphs)
             sel_secs = time.time() - t0
-            full = select_tests.Graph(select_tests.Tree(wt), tests_paths, [], aliases).tests
+            full = graphs["head"].tests
             sel_cache[sha] = (sel, summ, full, sel_secs, changed, deleted)
         sel, summ, full, sel_secs, changed, deleted = sel_cache[sha]
         w = lambda fs: sum(weights.get(f, med) for f in fs)
@@ -197,6 +202,11 @@ def main(argv=None):
         checkout = statistics.median(l["checkout"] for l in legs)
         select_job = fanin_lat + checkout + sel_secs
         model_wall = select_job + max(l["queue"] + l["setup"] + leg_pytest + l["post"] for l in by_end) + fanin_lat
+        if a.other_job_re:
+            others = [ts(j["completed_at"]) for j in jobs if re.search(a.other_job_re, j["name"])
+                      and j.get("completed_at") and j["conclusion"] in ("success", "failure")]
+            if others:
+                model_wall = max(model_wall, max(others) - created + fanin_lat)
         actual_min = sum(l["dur"] for l in legs) / 60
         model_min = (select_job + sum(l["setup"] + l["post"] + leg_pytest for l in by_end)) / 60
         failing, missed = [], []

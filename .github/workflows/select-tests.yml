@@ -452,9 +452,12 @@ jobs:
                   d = os.path.dirname(d)
 
 
-          def select(root, changed, deleted, base_rev=None, tests_paths=("tests",), source_roots=(), aliases=None):
+          def select(root, changed, deleted, base_rev=None, tests_paths=("tests",), source_roots=(), aliases=None,
+                     graphs=None):
               head_tree = Tree(root)
               head = Graph(head_tree, list(tests_paths), list(source_roots), aliases)
+              if graphs is not None:
+                  graphs["head"] = head
               base_tree = Tree(root, base_rev) if base_rev else None
               base = None
               tests_at_head = set(head.tests)
