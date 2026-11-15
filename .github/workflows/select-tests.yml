@@ -217,7 +217,7 @@ jobs:
                       if self.rev is None:
                           with open(os.path.join(self.root, path), encoding="utf-8", errors="replace") as fh:
                               return fh.read()
-                      r = subprocess.run(["git", "-C", self.root, "show", "%s:%s" % (self.rev, path)],
+                      r = subprocess.run(["git", "-C", self.root, "show", "%s:./%s" % (self.rev, path)],
                                          capture_output=True, check=True)
                       return r.stdout.decode("utf-8", errors="replace")
                   except (OSError, subprocess.CalledProcessError):
@@ -562,7 +562,12 @@ jobs:
                   else:
                       base = Graph(base_tree, list(tests_paths), list(source_roots), aliases, lazy_imports)
                       for p in deleted:
-                          hit = base.dependents([p]) & tests_at_head if p in base.pyset else set()
+                          if p in base.pyset:
+                              hit = base.dependents([p]) & tests_at_head
+                          elif not p.endswith(".py"):  # an asset: the tests of the modules that named it at the base
+                              hit = base.dependents(base.mentioning(p)) & tests_at_head
+                          else:
+                              hit = set()
                           for t in hit:
                               why[t].add("deleted")
                           if not hit:

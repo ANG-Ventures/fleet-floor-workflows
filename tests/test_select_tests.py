@@ -147,6 +147,26 @@ class SelectTests(unittest.TestCase):
         self.assertEqual(r.select(), ["tests/test_leaf.py"])
         self.assertEqual(r.summary["by_reason"]["deleted"], 1)
 
+    def test_deleted_file_under_a_subdirectory_root_reads_base_from_that_root(self):
+        r = Repo({"sub/" + p: b for p, b in BASE.items()})
+        sub = os.path.join(r.d, "sub")
+        os.remove(os.path.join(sub, "pkg/leaf.py"))
+        Path(sub, "pkg/other.py").write_text("X = 3\n")
+        cf, df = Path(r.d, ".changed"), Path(r.d, ".deleted")
+        cf.write_text("pkg/other.py\n")
+        df.write_text("pkg/leaf.py\n")
+        out = subprocess.run([sys.executable, str(SCRIPT), "--root", sub, "--base", r.base,
+                              "--changed-file", str(cf), "--deleted-file", str(df)],
+                             capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(out, ["tests/test_leaf.py", "tests/test_other_user.py"])
+
+    def test_deleted_asset_selects_the_tests_of_modules_that_named_it_at_base(self):
+        r = Repo()
+        r.delete("pkg/data.json")
+        r.change("pkg/other.py", "X = 3\n")
+        self.assertEqual(r.select(), ["tests/test_loader.py", "tests/test_other_user.py"])
+        self.assertEqual(r.summary["unreached"], [])
+
     def test_deleted_test_file_is_not_selected(self):
         r = Repo()
         r.delete("tests/test_leaf.py")
