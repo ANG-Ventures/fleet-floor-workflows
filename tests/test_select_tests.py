@@ -272,6 +272,31 @@ class WorkflowStep(unittest.TestCase):
         self.assertEqual(json.loads(o["legs"]), [1, 2, 3, 4, 5, 6])
         self.assertIn("CI_PR_SELECTION=off", o["reason"])
 
+    def test_change_outside_the_working_directory_still_runs_tests(self):
+        r = Repo()
+        Path(r.d, "other").mkdir()
+        git(r.d, "checkout", "-qb", "pr")
+        Path(r.d, "other", "x.txt").write_text("x\n")
+        git(r.d, "add", "-A")
+        git(r.d, "commit", "-qm", "pr")
+        git(r.d, "checkout", "-q", "-")
+        git(r.d, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+        wf = yaml.load(WF.read_text(), Loader=yaml.BaseLoader)
+        step = [s for s in wf["jobs"]["select"]["steps"] if s.get("name") == "Select tests"][0]
+        sub = Path(r.d, "sub")
+        sub.mkdir()
+        for p in ("pkg", "tests"):
+            subprocess.run(["cp", "-r", str(Path(r.d, p)), str(sub)], check=True)
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t, "out")
+            env = dict(os.environ, EVENT="pull_request", SELECTION="", WD="sub", TESTS_PATH="tests", SOURCE_ROOTS="",
+                       ALIASES="", LAZY="skip", MAX_LEGS="1", PER_LEG="0", PR="1", REPO="o/r", GH_TOKEN="",
+                       RUNNER_TEMP=t, GITHUB_OUTPUT=str(out), GITHUB_STEP_SUMMARY=str(Path(t, "s")))
+            p = subprocess.run(["bash", "-c", step["run"]], cwd=r.d, env=env, capture_output=True, text=True)
+            o = dict(l.split("=", 1) for l in out.read_text().splitlines())
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotEqual(o["count"], "0")
+
     def test_push_runs_the_full_suite(self):
         p, o = self.run_step(event="push")
         self.assertEqual((o["mode"], o["count"]), ("full", "9"))

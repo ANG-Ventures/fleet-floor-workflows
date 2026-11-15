@@ -672,9 +672,15 @@ jobs:
             fi
             # paths relative to working-directory
             if [ "$WD" != . ]; then
+              outside=$(cat "$T/changed.txt" "$T/deleted.txt" | grep -c -v "^${WD%/}/")
               for f in changed deleted; do
                 sed -n "s#^${WD%/}/##p" "$T/$f.txt" > "$T/$f.rel"; mv "$T/$f.rel" "$T/$f.txt"
               done
+              # never zero: a PR that changes only files outside the working directory still runs something
+              # (a root-level path no import reaches: the repo-wide scanners, or with none the suite)
+              if [ "$outside" -gt 0 ] && [ ! -s "$T/changed.txt" ] && [ ! -s "$T/deleted.txt" ]; then
+                echo "__changed_outside_working_directory__" > "$T/changed.txt"
+              fi
             fi
             echo "changed ($src):"; cat "$T/changed.txt"; echo "deleted:"; cat "$T/deleted.txt"
             ( cd "$WD" && python3 "$T/select_tests.py" --root . ${base:+--base "$base"} "${args[@]}" \
