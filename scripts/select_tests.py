@@ -14,8 +14,12 @@ Rules (card t_4c317916, spec 2026-11-14 design C):
   * a changed lockfile / requirements / pyproject selects the files that import a distribution whose pinned
     version or requirement line changed (third-party imports are matched by normalised top-level name);
   * a changed non-Python file selects the .py files that name its path (string literal / text mention);
+  * a non-test module's function-level (lazy) imports are not edges unless --lazy-imports follow;
+  * a test that reads the whole checkout (rglob / os.walk / `**` glob / git ls-files) is always selected:
+    no import edge points at it and any diff can turn it red;
   * never zero: when the repo has tests and the graph selects none, the tests in the changed files' own
-    packages run (nearest enclosing directory that has test files under it; the repo root = the full suite).
+    packages run (nearest enclosing directory below the repo root that has test files under it); with none,
+    the scanners above stand; a repo with neither runs its root package (the suite).
 
 Output: the selected test files, one per line (--out, default stdout). A one-line JSON summary goes to
 --summary-out (default stderr). Python 3.8+, stdlib only.
@@ -115,9 +119,41 @@ def _fixture(stmt):
     return None
 
 
+def _is_type_checking(test) -> bool:
+    return getattr(test, "id", getattr(test, "attr", "")) == "TYPE_CHECKING"
+
+
+def _module_scope(stmts):
+    """Statements that run at import time: not function bodies, not `if TYPE_CHECKING:`; class bodies do run."""
+    for st in stmts:
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if isinstance(st, ast.If) and _is_type_checking(st.test):
+            yield from _module_scope(st.orelse)
+        elif isinstance(st, ast.ClassDef):
+            yield from _module_scope(st.body)
+        elif isinstance(st, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, ast.Try)) \
+                or type(st).__name__ in ("TryStar", "Match"):
+            for field in ("body", "orelse", "finalbody"):
+                yield from _module_scope(getattr(st, field, []) or [])
+            for h in getattr(st, "handlers", []) or []:
+                yield from _module_scope(h.body)
+            for c in getattr(st, "cases", []) or []:
+                yield from _module_scope(c.body)
+        else:
+            yield st
+
+
+SCANNER_RE = re.compile(r"\.rglob\(|os\.walk\(|ls-files|glob\([^)\n]*\*\*")
+
+
 class Graph:
-    def __init__(self, tree: Tree, tests_paths: list, source_roots: list, aliases=None):
+    def __init__(self, tree: Tree, tests_paths: list, source_roots: list, aliases=None, lazy_imports="skip"):
         self.tree = tree
+        # "skip": a non-test module's function-level (lazy) imports are not edges. Following them makes most
+        # modules depend on most others (hermes-agent measured fan-in 1502/1935, scripts/ci/test_impact.py);
+        # the trunk run, which is never narrowed, covers them. "follow": every import is an edge.
+        self.lazy_imports = lazy_imports
         self.aliases = dict(aliases or {})  # import prefix -> real prefix (a runtime alias package)
         self.all_files = tree.files()
         self.py = [p for p in self.all_files if p.endswith(".py")]
@@ -172,6 +208,8 @@ class Graph:
                         if not re.search(r"\b%s\b" % re.escape(name), text):
                             continue
                     self.edges[t].add("%s::%s" % (c, name))
+        # tests that read the whole checkout (ratchets, lints): no import edge points at them, any diff can turn them red
+        self.scanners = sorted(t for t in self.tests if SCANNER_RE.search(self.tree.read(t) or ""))
         self.rev = defaultdict(set)
         for a, bs in self.edges.items():
             for b in bs:
@@ -232,8 +270,10 @@ class Graph:
                     node = "%s::%s" % (p, stmt.name)  # a fixture: its body's imports reach only its users
                     self.fixtures[p][stmt.name] = (fx, [a.arg for a in stmt.args.args])
                     self._add_imports(p, node, ast.walk(stmt))
-        else:
+        elif self.lazy_imports == "follow" or is_test_file(p):
             self._add_imports(p, p, ast.walk(tree))
+        else:  # a non-test module: the imports that run when it is imported
+            self._add_imports(p, p, (n for st in _module_scope(tree.body) for n in ast.walk(st)))
 
     def _add_imports(self, p: str, node_id: str, nodes) -> None:
         pkg = None
@@ -327,21 +367,21 @@ def is_dep_manifest(path: str) -> bool:
     return b in LOCKFILES or b == "pyproject.toml" or (b.startswith("requirements") and b.endswith(".txt"))
 
 
-def own_package_tests(path: str, tests: list) -> set:
+def own_package_tests(path: str, tests: list, allow_root: bool) -> set:
+    """Tests under the nearest enclosing directory of `path` that has any; the repo root only if allow_root."""
     d = os.path.dirname(path)
-    while True:
-        hit = {t for t in tests if not d or t.startswith(d + "/")}
+    while d:
+        hit = {t for t in tests if t.startswith(d + "/")}
         if hit:
             return hit
-        if not d:
-            return set()
         d = os.path.dirname(d)
+    return set(tests) if allow_root else set()
 
 
 def select(root, changed, deleted, base_rev=None, tests_paths=("tests",), source_roots=(), aliases=None,
-           graphs=None):
+           graphs=None, lazy_imports="skip"):
     head_tree = Tree(root)
-    head = Graph(head_tree, list(tests_paths), list(source_roots), aliases)
+    head = Graph(head_tree, list(tests_paths), list(source_roots), aliases, lazy_imports)
     if graphs is not None:
         graphs["head"] = head
     base_tree = Tree(root, base_rev) if base_rev else None
@@ -373,26 +413,35 @@ def select(root, changed, deleted, base_rev=None, tests_paths=("tests",), source
         if base_tree is None:
             unreached.extend(deleted)
         else:
-            base = Graph(base_tree, list(tests_paths), list(source_roots), aliases)
+            base = Graph(base_tree, list(tests_paths), list(source_roots), aliases, lazy_imports)
             for p in deleted:
                 hit = base.dependents([p]) & tests_at_head if p in base.pyset else set()
                 for t in hit:
                     why[t].add("deleted")
                 if not hit:
                     unreached.append(p)
+    # Never zero. Order: the graph; else the changed files' own packages (below the repo root); else the
+    # repo-wide scanners (the tests that read every file, so the only ones a file nobody names can turn red);
+    # only a repo with none of those runs its root package, i.e. the suite.
     fallback = False
     if not why and head.tests and (changed or deleted):
         fallback = True
         for p in list(changed) + list(deleted):
-            for t in own_package_tests(p, head.tests):
+            for t in own_package_tests(p, head.tests, allow_root=False):
                 why[t].add("own-package")
+        if not why and not head.scanners:
+            for t in head.tests:
+                why[t].add("own-package")
+    if changed or deleted:
+        for t in head.scanners:
+            why[t].add("scanner")
     selected = sorted(why)
     summary = {
         "selected": len(selected), "total": len(head.tests), "changed": len(changed), "deleted": len(deleted),
         "fallback_own_package": fallback, "unreached": sorted(unreached)[:20],
         "parse_errors": head.parse_errors[:20],
         "by_reason": {r: sum(1 for t in selected if r in why[t])
-                      for r in ("changed", "graph", "deleted", "own-package")},
+                      for r in ("changed", "graph", "deleted", "own-package", "scanner")},
     }
     return selected, summary
 
@@ -415,6 +464,8 @@ def main(argv=None) -> int:
     ap.add_argument("--source-root", action="append", default=[], help="extra import root (src/ is automatic)")
     ap.add_argument("--alias", action="append", default=[], metavar="OLD=NEW",
                     help="runtime alias package: `import OLD.x` loads NEW.x (repeatable)")
+    ap.add_argument("--lazy-imports", choices=("skip", "follow"), default="skip",
+                    help="follow function-level imports of non-test modules (default skip)")
     ap.add_argument("--all", action="store_true", help="print the full suite (the CI_PR_SELECTION=off list)")
     ap.add_argument("--out")
     ap.add_argument("--summary-out")
@@ -422,11 +473,11 @@ def main(argv=None) -> int:
     tests_paths = a.tests_path or ["tests"]
     aliases = dict(x.split("=", 1) for x in a.alias if "=" in x)
     if a.all:
-        g = Graph(Tree(a.root), tests_paths, a.source_root, aliases)
+        g = Graph(Tree(a.root), tests_paths, a.source_root, aliases, a.lazy_imports)
         selected, summary = g.tests, {"selected": len(g.tests), "total": len(g.tests), "mode": "full"}
     else:
         selected, summary = select(a.root, read_list(a.changed_file), read_list(a.deleted_file), a.base,
-                                   tests_paths, a.source_root, aliases)
+                                   tests_paths, a.source_root, aliases, lazy_imports=a.lazy_imports)
         summary["mode"] = "selected"
     text = "".join(t + "\n" for t in selected)
     if a.out:

@@ -185,6 +185,46 @@ class SelectTests(unittest.TestCase):
         r2.change("pkg/core.py", "VALUE = 9\n")
         self.assertIn("tests/test_alias.py", r2.select("--alias", "legacy=pkg"))
 
+    def test_lazy_import_in_a_module_is_skipped_unless_followed(self):
+        files = dict(BASE)
+        files["pkg/lazy.py"] = "def f():\n    from pkg import other\n    return other\n"
+        files["tests/test_lazy.py"] = "import pkg.lazy\n"
+        r = Repo(files)
+        r.change("pkg/other.py", "X = 5\n")
+        self.assertNotIn("tests/test_lazy.py", r.select())
+        r2 = Repo(files)
+        r2.change("pkg/other.py", "X = 5\n")
+        self.assertIn("tests/test_lazy.py", r2.select("--lazy-imports", "follow"))
+
+    def test_type_checking_import_is_not_an_edge_but_class_body_import_is(self):
+        files = dict(BASE)
+        files["pkg/typed.py"] = ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from pkg import other\n"
+                                 "class C:\n    from pkg import leaf\n")
+        files["tests/test_typed.py"] = "import pkg.typed\n"
+        r = Repo(files)
+        r.change("pkg/other.py", "X = 5\n")
+        self.assertNotIn("tests/test_typed.py", r.select())
+        r2 = Repo(files)
+        r2.change("pkg/leaf.py", "Y = 1\n")
+        self.assertIn("tests/test_typed.py", r2.select())
+
+    def test_repo_scanner_is_always_selected_and_stands_in_for_an_unnamed_root_file(self):
+        files = dict(BASE)
+        files["tests/test_ratchet.py"] = "from pathlib import Path\nFILES = list(Path('.').rglob('*.py'))\n"
+        r = Repo(files)
+        r.change("pkg/leaf.py", "from pkg.core import VALUE\nY = 3\n")
+        self.assertEqual(r.select(), ["tests/test_leaf.py", "tests/test_ratchet.py"])
+        r2 = Repo(files)
+        r2.change("NOTES.txt", "x\n")  # root-level, nothing names it: the scanner, not the whole suite
+        self.assertEqual(r2.select(), ["tests/test_ratchet.py"])
+
+    def test_root_file_with_no_scanner_runs_the_root_package(self):
+        r = Repo()
+        r.change("NOTES.txt", "x\n")
+        sel = r.select()
+        self.assertEqual(len(sel), r.summary["total"])
+        self.assertTrue(r.summary["fallback_own_package"])
+
     def test_all_prints_the_full_suite(self):
         r = Repo()
         out = subprocess.run([sys.executable, str(SCRIPT), "--root", r.d, "--all"], capture_output=True,
@@ -209,7 +249,7 @@ class WorkflowStep(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             out, summ = Path(t, "out"), Path(t, "summary")
             env = dict(os.environ, EVENT=event, SELECTION=selection, WD=".", TESTS_PATH="tests", SOURCE_ROOTS="",
-                       ALIASES="", MAX_LEGS=max_legs, PER_LEG=per_leg, PR="1", REPO="o/r", GH_TOKEN="",
+                       ALIASES="", LAZY="skip", MAX_LEGS=max_legs, PER_LEG=per_leg, PR="1", REPO="o/r", GH_TOKEN="",
                        RUNNER_TEMP=t, GITHUB_OUTPUT=str(out), GITHUB_STEP_SUMMARY=str(summ))
             p = subprocess.run(["bash", "-c", step["run"]], cwd=r.d, env=env, capture_output=True, text=True)
             outputs = dict(l.split("=", 1) for l in out.read_text().splitlines()) if out.exists() else {}
@@ -242,7 +282,7 @@ class WorkflowStep(unittest.TestCase):
         step = [s for s in wf["jobs"]["select"]["steps"] if s.get("name") == "Select tests"][0]
         with tempfile.TemporaryDirectory() as t:
             env = dict(os.environ, EVENT="pull_request", SELECTION="", WD=".", TESTS_PATH="tests",
-                       SOURCE_ROOTS="", ALIASES="", MAX_LEGS="1", PER_LEG="0", PR="1", REPO="o/nonexistent-zz",
+                       SOURCE_ROOTS="", ALIASES="", LAZY="skip", MAX_LEGS="1", PER_LEG="0", PR="1", REPO="o/nonexistent-zz",
                        GH_TOKEN="x", RUNNER_TEMP=t, GITHUB_OUTPUT=str(Path(t, "o")),
                        GITHUB_STEP_SUMMARY=str(Path(t, "s")), PATH="/usr/bin:/bin")
             p = subprocess.run(["bash", "-c", step["run"]], cwd=r.d, env=env, capture_output=True, text=True)

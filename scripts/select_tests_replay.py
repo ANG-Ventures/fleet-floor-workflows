@@ -100,6 +100,7 @@ def main(argv=None):
     ap.add_argument("--tests-path", action="append")
     ap.add_argument("--alias", action="append", default=[])
     ap.add_argument("--source-root", action="append", default=[])
+    ap.add_argument("--lazy-imports", default="skip", choices=("skip", "follow"))
     ap.add_argument("--max-legs", type=int, default=1)
     ap.add_argument("--files-per-leg", type=int, default=0)
     ap.add_argument("--out", required=True)
@@ -159,8 +160,10 @@ def main(argv=None):
             continue
         fanin = fanin[0]
         created = ts(r["created_at"])
-        last_shard = max(ts(j["completed_at"]) for j in shards)
-        fanin_lat = ts(fanin["completed_at"]) - last_shard
+        others_end = [ts(j["completed_at"]) for j in jobs if a.other_job_re and re.search(a.other_job_re, j["name"])
+                      and j.get("completed_at") and j["conclusion"] in ("success", "failure")]
+        last_need = max([ts(j["completed_at"]) for j in shards] + others_end)
+        fanin_lat = ts(fanin["completed_at"]) - last_need  # queue + run of a no-op job on this pool, this run
         actual_wall = ts(fanin["completed_at"]) - created
         legs = []
         for j in shards:
@@ -176,6 +179,10 @@ def main(argv=None):
         if not legs:
             continue
         sha = r["head_sha"]
+        sc = os.path.join(a.out, "sel-" + a.lazy_imports, sha + ".json")
+        if sha not in sel_cache and os.path.exists(sc):
+            with open(sc) as fh:
+                sel_cache[sha] = tuple(json.load(fh))
         if sha not in sel_cache:
             mb = git(a.clone, "merge-base", sha, "origin/main", check=False).strip()
             if not mb:
@@ -188,10 +195,14 @@ def main(argv=None):
                 git(wt, "checkout", "-q", "--detach", "-f", sha)
             t0 = time.time()
             graphs = {}
-            sel, summ = select_tests.select(wt, changed, deleted, mb, tests_paths, a.source_root, aliases, graphs)
+            sel, summ = select_tests.select(wt, changed, deleted, mb, tests_paths, a.source_root, aliases, graphs,
+                                            a.lazy_imports)
             sel_secs = time.time() - t0
             full = graphs["head"].tests
             sel_cache[sha] = (sel, summ, full, sel_secs, changed, deleted)
+            os.makedirs(os.path.dirname(sc), exist_ok=True)
+            with open(sc, "w") as fh:
+                json.dump(sel_cache[sha], fh)
         sel, summ, full, sel_secs, changed, deleted = sel_cache[sha]
         w = lambda fs: sum(weights.get(f, med) for f in fs)
         frac = (w(sel) / w(full)) if full else 1.0
@@ -203,11 +214,8 @@ def main(argv=None):
         checkout = statistics.median(l["checkout"] for l in legs)
         select_job = fanin_lat + checkout + sel_secs
         model_wall = select_job + max(l["queue"] + l["setup"] + leg_pytest + l["post"] for l in by_end) + fanin_lat
-        if a.other_job_re:
-            others = [ts(j["completed_at"]) for j in jobs if re.search(a.other_job_re, j["name"])
-                      and j.get("completed_at") and j["conclusion"] in ("success", "failure")]
-            if others:
-                model_wall = max(model_wall, max(others) - created + fanin_lat)
+        if others_end:  # jobs selection does not shorten still bound the wall
+            model_wall = max(model_wall, max(others_end) - created + fanin_lat)
         actual_min = sum(l["dur"] for l in legs) / 60
         model_min = (select_job + sum(l["setup"] + l["post"] + leg_pytest for l in by_end)) / 60
         failing, missed = [], []
