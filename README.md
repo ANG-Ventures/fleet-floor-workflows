@@ -280,6 +280,25 @@ fix ships a regression test"; card t_d1ac622f). A **fix PR that changes code but
 - Not a required check. Caller: [`templates/regression-test-lint.yml`](templates/regression-test-lint.yml)
   (no `paths:`, the lint reads the PR as a whole). Contract + fixtures: `tests/test_regression_test_lint.py`.
 
+## PR test selection: `select-tests.yml` (t_4c317916)
+
+One reusable workflow picks the pytest files a pull request can reach through the calling repo's static Python
+import graph; the caller runs only those. Caller: [`templates/select-tests.yml`](templates/select-tests.yml).
+
+- **Rules** (`scripts/select_tests.py`, embedded byte-for-byte in the workflow, so the caller's SHA pin pins it):
+  a changed test file selects itself; a changed module selects every test that imports it, transitively;
+  every test depends on the `conftest.py` files above it, and a module imported inside a non-autouse fixture
+  reaches only the tests that name that fixture; a deleted file selects the tests that imported it at the base;
+  a lockfile / requirements / pyproject change selects the importers of the distributions whose pin changed;
+  a non-Python file selects the modules that name its path. Never zero: if the graph reaches nothing, the
+  tests in the changed files' own package run.
+- **No run-everything fallback.** An unreadable diff (no merge parent and no REST file list) fails the job.
+- **Switch:** repo variable `CI_PR_SELECTION`. `off` = the full suite on every PR; unset = on. Only
+  `pull_request` is narrowed; push, merge_group and schedule run the full suite.
+- **Onboarding:** run `scripts/select_tests_replay.py` over the repo's last 14 days of merged PRs first. Wire
+  the caller only where PR wall time drops at both p50 and p90 with the select job in front, and no red the
+  replay saw is skipped.
+
 ## Self-test
 
 [`selftest.yml`](.github/workflows/selftest.yml) runs all five against the clean in-repo
