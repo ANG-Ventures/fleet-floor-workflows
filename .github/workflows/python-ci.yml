@@ -38,6 +38,22 @@ on:
         description: "Opt-in pytest-xdist worker count ('auto' or a positive integer); empty = serial pytest."
         type: string
         default: ""
+      pytest-dist:
+        description: >-
+          Opt-in xdist scheduler (`--dist`): load, loadscope, loadfile, loadgroup or worksteal. Needs
+          pytest-workers. Empty = xdist's default (load).
+        type: string
+        default: ""
+      pytest-durations:
+        description: "Print the N slowest tests (`--durations=N`) in the log; 0 = off."
+        type: number
+        default: 0
+      test-timeout-minutes:
+        description: >-
+          Timeout of the pytest step alone, so a hang fails the job while the job budget still has room
+          for a re-run. 0 = the job's timeout-minutes.
+        type: number
+        default: 0
       shards:
         description: >-
           Number of parallel test jobs (1-16). 1 = one job named `ci` (unchanged); N > 1 = N jobs
@@ -101,7 +117,14 @@ jobs:
         env:
           INSTALL_CMD: ${{ inputs.install }}
           PYTEST_WORKERS: ${{ inputs.pytest-workers }}
+          TEST_TIMEOUT_MINUTES: ${{ inputs.test-timeout-minutes }}
         run: |
+          # The runner truncates a step timeout to whole minutes, so 0.5 would mean no step timeout;
+          # only 0 (the job budget) or a positive integer is valid (t_ff163170).
+          case "${TEST_TIMEOUT_MINUTES:-0}" in
+            0) ;;
+            *[!0-9]*|0*) echo "::error::test-timeout-minutes must be 0 or a positive integer, got '${TEST_TIMEOUT_MINUTES}'"; exit 1 ;;
+          esac
           python -m pip install --upgrade pip
           if [ -n "$INSTALL_CMD" ]; then
             echo "custom install: $INSTALL_CMD"
@@ -129,10 +152,14 @@ jobs:
           fi
 
       - name: Run tests (pytest) or import-smoke
+        # 0 = the job budget (unchanged); a positive value fails a hung pytest step early (t_ff163170).
+        timeout-minutes: ${{ inputs.test-timeout-minutes > 0 && inputs.test-timeout-minutes || inputs.timeout-minutes }}
         env:
           TESTS: ${{ inputs.tests-path }}
           IMPORT: ${{ inputs.import-name }}
           PYTEST_WORKERS: ${{ inputs.pytest-workers }}
+          PYTEST_DIST: ${{ inputs.pytest-dist }}
+          PYTEST_DURATIONS: ${{ inputs.pytest-durations }}
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_TOTAL: ${{ inputs.shards }}
         run: |
@@ -144,6 +171,24 @@ jobs:
             auto) xdist=(-n auto) ;;
             *[!0-9]*|0*) echo "::error::pytest-workers must be 'auto' or a positive integer, got '${PYTEST_WORKERS}'"; exit 1 ;;
             *) xdist=(-n "$PYTEST_WORKERS") ;;
+          esac
+          # Opt-in xdist scheduler (t_ff163170): worksteal lets idle workers take queued tests from a busy
+          # one, so a few long tests at the end of the queue do not run back to back on one worker.
+          case "${PYTEST_DIST:-}" in
+            "") ;;
+            load|loadscope|loadfile|loadgroup|worksteal)
+              if [ "${#xdist[@]}" -eq 0 ]; then
+                echo "::error::pytest-dist needs pytest-workers"; exit 1
+              fi
+              xdist+=(--dist "$PYTEST_DIST") ;;
+            *) echo "::error::pytest-dist must be load, loadscope, loadfile, loadgroup or worksteal, got '${PYTEST_DIST}'"; exit 1 ;;
+          esac
+          # Opt-in slowest-test report: names the tests behind a long silent tail in `-q` output.
+          durations=()
+          case "${PYTEST_DURATIONS:-0}" in
+            0) ;;
+            *[!0-9]*|0*) echo "::error::pytest-durations must be a non-negative integer, got '${PYTEST_DURATIONS}'"; exit 1 ;;
+            *) durations=("--durations=$PYTEST_DURATIONS") ;;
           esac
           # shards=1 -> no shard argument at all (the pre-shard command, unchanged). N > 1 -> an inline
           # plugin keeps every N-th collected item (offset i-1) and deselects the rest. Collection order
@@ -178,7 +223,7 @@ jobs:
           fi
           if [ -n "$found" ]; then
             echo "tests present -> pytest ($TESTS) [strength=real]"
-            python -m pytest "$TESTS" -q ${xdist[@]+"${xdist[@]}"} ${shard[@]+"${shard[@]}"}
+            python -m pytest "$TESTS" -q ${xdist[@]+"${xdist[@]}"} ${durations[@]+"${durations[@]}"} ${shard[@]+"${shard[@]}"}
           elif [ -n "$TESTS" ] && [ -d "$TESTS" ] && python3 -c 'import pathlib, sys; d = pathlib.Path(sys.argv[1]); sys.exit(0 if next(d.rglob("test_*.py"), None) or next(d.rglob("*_test.py"), None) else 1)' "$TESTS"; then
             # Independent re-check: a weak branch over a dir that holds test files is a hard failure.
             echo "::error::$TESTS contains test files but detection chose the weak branch; refusing a vacuous green"

@@ -98,7 +98,7 @@ class PythonShardsContract(unittest.TestCase):
 
     def test_one_shard_keeps_the_pre_shard_command(self):
         run = step()["run"]
-        self.assertIn('python -m pytest "$TESTS" -q ${xdist[@]+"${xdist[@]}"} ${shard[@]+"${shard[@]}"}', run)
+        self.assertIn('python -m pytest "$TESTS" -q ${xdist[@]+"${xdist[@]}"} ${durations[@]+"${durations[@]}"} ${shard[@]+"${shard[@]}"}', run)
         self.assertIn('if [ "${SHARD_TOTAL:-1}" != "1" ]; then', run)
 
     @unittest.skipUnless(have_pytest(), "pytest missing")
