@@ -36,9 +36,10 @@ class Tree:
         (tdir / "test_a.py").write_text("")
         bindir = Path(self.d, "bin")
         bindir.mkdir()
-        stub = bindir / "python"
-        stub.write_text('#!/bin/sh\necho "STUB-PYTHON $*"\nexit 0\n')
-        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        for exe in ("python", "pip"):
+            stub = bindir / exe
+            stub.write_text(f'#!/bin/sh\necho "STUB-{exe.upper()} $*"\nexit 0\n')
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
         self.path = f"{bindir}{os.pathsep}{os.environ['PATH']}"
 
     def run(self, workers="", dist="", durations="0"):
@@ -106,6 +107,25 @@ class PytestDistDurationsContract(unittest.TestCase):
             self.assertNotEqual(rc, 0, f"{kw}: {out}")
             self.assertIn(msg, out)
             self.assertNotIn("STUB-PYTHON -m pytest", out)
+
+    def test_step_timeout_must_be_a_whole_number_of_minutes(self):
+        # The runner truncates step timeouts to whole minutes: 0.5 would silently mean no step timeout.
+        script = step("Install package")["run"]
+        for good in ("0", "1", "150"):
+            env = dict(os.environ, PATH=self.t.path, INSTALL_CMD="true", PYTEST_WORKERS="",
+                       TEST_TIMEOUT_MINUTES=good)
+            r = subprocess.run(["bash", "-e", "-c", script], cwd=self.t.d, env=env,
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, f"{good}: {r.stdout}{r.stderr}")
+        for bad in ("0.5", "-1", "1.5", "07", "1e2"):
+            env = dict(os.environ, PATH=self.t.path, INSTALL_CMD="true", PYTEST_WORKERS="",
+                       TEST_TIMEOUT_MINUTES=bad)
+            r = subprocess.run(["bash", "-e", "-c", script], cwd=self.t.d, env=env,
+                               capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertIn("test-timeout-minutes must be 0 or a positive integer", r.stdout + r.stderr)
+        self.assertEqual(step("Install package")["env"]["TEST_TIMEOUT_MINUTES"],
+                         "${{ inputs.test-timeout-minutes }}")
 
     def test_live_selftest_exercises_the_inputs(self):
         job = workflow("selftest.yml")["jobs"]["ci_pytest_workers"]

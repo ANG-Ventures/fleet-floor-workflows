@@ -117,7 +117,14 @@ jobs:
         env:
           INSTALL_CMD: ${{ inputs.install }}
           PYTEST_WORKERS: ${{ inputs.pytest-workers }}
+          TEST_TIMEOUT_MINUTES: ${{ inputs.test-timeout-minutes }}
         run: |
+          # The runner truncates a step timeout to whole minutes, so 0.5 would mean no step timeout;
+          # only 0 (the job budget) or a positive integer is valid (t_ff163170).
+          case "${TEST_TIMEOUT_MINUTES:-0}" in
+            0) ;;
+            *[!0-9]*|0*) echo "::error::test-timeout-minutes must be 0 or a positive integer, got '${TEST_TIMEOUT_MINUTES}'"; exit 1 ;;
+          esac
           python -m pip install --upgrade pip
           if [ -n "$INSTALL_CMD" ]; then
             echo "custom install: $INSTALL_CMD"
