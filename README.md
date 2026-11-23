@@ -67,6 +67,12 @@ or ports across test files):
       pytest-workers: auto
 ```
 
+Three more opt-ins for a long parallel suite, all off by default (the command is unchanged):
+`pytest-dist` sets the xdist scheduler (`--dist`; `worksteal` lets idle workers take queued tests
+from a busy one; needs `pytest-workers`), `pytest-durations: N` prints the N slowest tests
+(`--durations=N`), and `test-timeout-minutes` bounds the pytest step alone (0 = the job's
+`timeout-minutes`), so a hang fails while the job budget still leaves time for a re-run.
+
 JS/TS CI (`js-ci.yml`) takes the same numeric `timeout-minutes` input with the same
 20-minute default, for a serial test suite that outgrows the floor's hung-test guard:
 

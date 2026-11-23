@@ -43,6 +43,10 @@ jobs:
       tests-path: tests
       import-name: sample_pkg
       pytest-workers: auto
+      # t_ff163170: scheduler, slowest-test report and pytest-step timeout, live on a real runner.
+      pytest-dist: worksteal
+      pytest-durations: 5
+      test-timeout-minutes: 15
       concurrency-suffix: py-pytest-workers
 
   # Opt-in python-ci shards (t_a9a0e768). Locked by tests/test_python_ci_shards.py.
